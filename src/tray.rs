@@ -4,8 +4,9 @@
 //! 往唤醒管道写一个字节。主循环据此醒来处理命令并回推新状态
 //! （`Handle::update`），回调里绝不能调用 `update`（会死锁）。
 
-use crate::config::{COLOR_PRESETS, Config, Mode};
-use crate::render::{self, Style};
+use crate::config::{COLOR_PRESETS, Config, Mode, TrayIconKind};
+use crate::i18n::Lang;
+use crate::render::Style;
 use crate::timer::{PomodoroPhase, Timer, now};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{CheckmarkItem, MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu};
@@ -26,8 +27,17 @@ pub enum Command {
     ToggleClockFormat,
     FontSizeDelta(f64),
     OpacityDelta(f64),
+    /// 选择内置字体族
     SetFont(String),
+    /// 弹出文件选择框选字体文件
+    BrowseFont,
+    SetFontFile(String),
     SetColor(String),
+    SetTrayIcon(TrayIconKind),
+    /// 弹出文件选择框选托盘图片
+    BrowseTrayIcon,
+    SetTrayIconFile(String),
+    SetLanguage(Lang),
     Quit,
 }
 
@@ -41,6 +51,9 @@ pub struct TrayState {
     pub click_through: bool,
     pub clock_24h: bool,
     pub phase: Option<PomodoroPhase>,
+    pub lang: Lang,
+    /// 图片图标是否已生效（菜单里勾选「图片」）
+    pub icon_is_image: bool,
     /// 可选字体（系统已安装的常用字体）与当前字体
     pub fonts: Vec<String>,
     pub current_font: String,
@@ -63,6 +76,9 @@ pub struct TrayChannels {
     pub rx: Receiver<Command>,
     /// 唤醒管道的读端（已设为非阻塞）
     pub wake_read: OwnedFd,
+    /// 主循环从其它线程（文件选择框）投递命令用
+    pub tx: Sender<Command>,
+    pub wake_write: OwnedFd,
 }
 
 impl CatickTray {
@@ -71,6 +87,16 @@ impl CatickTray {
         // 唤醒主循环；管道满了也无所谓，反正已经有信号了
         let _ = rustix::io::write(&self.wake, b"c");
     }
+}
+
+/// 构造标准菜单项的小工具。
+fn item<F: Fn(&mut CatickTray) + Send + 'static>(label: &str, f: F) -> MenuItem<CatickTray> {
+    StandardItem {
+        label: label.into(),
+        activate: Box::new(f),
+        ..Default::default()
+    }
+    .into()
 }
 
 impl Tray for CatickTray {
@@ -102,12 +128,20 @@ impl Tray for CatickTray {
     }
 
     fn tool_tip(&self) -> ToolTip {
+        let t = self.state.lang.t();
         let mut lines = vec![format!("Catick · {}", self.state.display)];
         if let Some(phase) = self.state.phase {
-            lines.push(phase.label().to_string());
+            lines.push(
+                match phase {
+                    PomodoroPhase::Work => t.phase_work,
+                    PomodoroPhase::ShortBreak => t.phase_short,
+                    PomodoroPhase::LongBreak => t.phase_long,
+                }
+                .to_string(),
+            );
         }
         if self.state.mode != Mode::Clock && !self.state.running {
-            lines.push("已暂停".into());
+            lines.push(t.paused.to_string());
         }
         ToolTip {
             title: "Catick".into(),
@@ -122,10 +156,12 @@ impl Tray for CatickTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        let t = self.state.lang.t();
+        let en = self.state.lang.resolved() == Lang::En;
         let pause_label = if self.state.running {
-            "暂停"
+            t.pause
         } else {
-            "继续"
+            t.resume
         };
         let mode_index = match self.state.mode {
             Mode::Clock => 0,
@@ -133,36 +169,28 @@ impl Tray for CatickTray {
             Mode::Stopwatch => 2,
             Mode::Pomodoro => 3,
         };
+        let icon_index = usize::from(self.state.icon_is_image);
+        let lang_index = usize::from(en);
 
         vec![
-            StandardItem {
-                label: pause_label.into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::TogglePause)),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "重置".into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::Reset)),
-                ..Default::default()
-            }
-            .into(),
+            item(pause_label, |tray| tray.send(Command::TogglePause)),
+            item(t.reset, |tray| tray.send(Command::Reset)),
             MenuItem::Separator,
             SubMenu {
-                label: "模式".into(),
+                label: t.mode.into(),
                 submenu: vec![
                     RadioGroup {
                         selected: mode_index,
-                        select: Box::new(|t: &mut Self, index: usize| {
+                        select: Box::new(|tray: &mut Self, index: usize| {
                             let mode = match index {
                                 0 => Mode::Clock,
                                 1 => Mode::Countdown,
                                 2 => Mode::Stopwatch,
                                 _ => Mode::Pomodoro,
                             };
-                            t.send(Command::SetMode(mode));
+                            tray.send(Command::SetMode(mode));
                         }),
-                        options: ["时钟", "倒计时", "秒表", "番茄钟"]
+                        options: [t.clock, t.countdown, t.stopwatch, t.pomodoro]
                             .iter()
                             .map(|label| RadioItem {
                                 label: (*label).into(),
@@ -176,16 +204,12 @@ impl Tray for CatickTray {
             }
             .into(),
             SubMenu {
-                label: "快捷预设".into(),
+                label: t.presets.into(),
                 submenu: [1u64, 5, 15, 25, 45]
                     .iter()
                     .map(|minutes| {
-                        MenuItem::from(StandardItem {
-                            label: format!("{minutes} 分钟"),
-                            activate: Box::new(move |t: &mut Self| {
-                                t.send(Command::SetPreset(minutes * 60))
-                            }),
-                            ..Default::default()
+                        item(&format!("{minutes} {}", t.minute), move |tray| {
+                            tray.send(Command::SetPreset(minutes * 60));
                         })
                     })
                     .collect(),
@@ -194,28 +218,29 @@ impl Tray for CatickTray {
             .into(),
             MenuItem::Separator,
             CheckmarkItem {
-                label: "编辑模式".into(),
+                label: t.edit_mode.into(),
                 checked: self.state.edit_mode,
-                activate: Box::new(|t: &mut Self| t.send(Command::ToggleEditMode)),
+                activate: Box::new(|tray: &mut Self| tray.send(Command::ToggleEditMode)),
                 ..Default::default()
             }
             .into(),
             CheckmarkItem {
-                label: "鼠标穿透".into(),
+                label: t.click_through.into(),
                 checked: self.state.click_through,
-                activate: Box::new(|t: &mut Self| t.send(Command::ToggleClickThrough)),
+                activate: Box::new(|tray: &mut Self| tray.send(Command::ToggleClickThrough)),
                 ..Default::default()
             }
             .into(),
             CheckmarkItem {
-                label: "24 小时制".into(),
+                label: t.clock_24h.into(),
                 checked: self.state.clock_24h,
-                activate: Box::new(|t: &mut Self| t.send(Command::ToggleClockFormat)),
+                activate: Box::new(|tray: &mut Self| tray.send(Command::ToggleClockFormat)),
                 ..Default::default()
             }
             .into(),
+            MenuItem::Separator,
             SubMenu {
-                label: "字体".into(),
+                label: t.font.into(),
                 submenu: vec![
                     RadioGroup {
                         selected: self
@@ -224,9 +249,9 @@ impl Tray for CatickTray {
                             .iter()
                             .position(|f| f == &self.state.current_font)
                             .unwrap_or(usize::MAX),
-                        select: Box::new(|t: &mut Self, index: usize| {
-                            if let Some(font) = t.state.fonts.get(index) {
-                                t.send(Command::SetFont(font.clone()));
+                        select: Box::new(|tray: &mut Self, index: usize| {
+                            if let Some(font) = tray.state.fonts.get(index) {
+                                tray.send(Command::SetFont(font.clone()));
                             }
                         }),
                         options: self
@@ -240,27 +265,29 @@ impl Tray for CatickTray {
                             .collect(),
                     }
                     .into(),
+                    MenuItem::Separator,
+                    item(t.font_more, |tray| tray.send(Command::BrowseFont)),
                 ],
                 ..Default::default()
             }
             .into(),
             SubMenu {
-                label: "颜色".into(),
+                label: t.color.into(),
                 submenu: vec![
                     RadioGroup {
                         selected: COLOR_PRESETS
                             .iter()
-                            .position(|(_, hex)| *hex == self.state.current_color)
+                            .position(|(_, _, hex)| *hex == self.state.current_color)
                             .unwrap_or(usize::MAX),
-                        select: Box::new(|t: &mut Self, index: usize| {
-                            if let Some((_, hex)) = COLOR_PRESETS.get(index) {
-                                t.send(Command::SetColor((*hex).to_string()));
+                        select: Box::new(|tray: &mut Self, index: usize| {
+                            if let Some((_, _, hex)) = COLOR_PRESETS.get(index) {
+                                tray.send(Command::SetColor((*hex).to_string()));
                             }
                         }),
                         options: COLOR_PRESETS
                             .iter()
-                            .map(|(name, _)| RadioItem {
-                                label: (*name).into(),
+                            .map(|(zh, en_name, _)| RadioItem {
+                                label: if en { (*en_name).into() } else { (*zh).into() },
                                 ..Default::default()
                             })
                             .collect(),
@@ -271,37 +298,69 @@ impl Tray for CatickTray {
             }
             .into(),
             SubMenu {
-                label: "字号".into(),
+                label: t.font_size.into(),
                 submenu: vec![
-                    StandardItem {
-                        label: "增大".into(),
-                        activate: Box::new(|t: &mut Self| t.send(Command::FontSizeDelta(2.0))),
-                        ..Default::default()
-                    }
-                    .into(),
-                    StandardItem {
-                        label: "减小".into(),
-                        activate: Box::new(|t: &mut Self| t.send(Command::FontSizeDelta(-2.0))),
-                        ..Default::default()
-                    }
-                    .into(),
+                    item(t.increase, |tray| tray.send(Command::FontSizeDelta(2.0))),
+                    item(t.decrease, |tray| tray.send(Command::FontSizeDelta(-2.0))),
                 ],
                 ..Default::default()
             }
             .into(),
             SubMenu {
-                label: "透明度".into(),
+                label: t.opacity.into(),
                 submenu: vec![
-                    StandardItem {
-                        label: "提高".into(),
-                        activate: Box::new(|t: &mut Self| t.send(Command::OpacityDelta(0.05))),
-                        ..Default::default()
+                    item(t.raise, |tray| tray.send(Command::OpacityDelta(0.05))),
+                    item(t.lower, |tray| tray.send(Command::OpacityDelta(-0.05))),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: t.tray_icon.into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: icon_index,
+                        select: Box::new(|tray: &mut Self, index: usize| {
+                            tray.send(Command::SetTrayIcon(if index == 1 {
+                                TrayIconKind::Image
+                            } else {
+                                TrayIconKind::Ring
+                            }));
+                        }),
+                        options: [t.icon_ring, t.icon_image]
+                            .iter()
+                            .map(|label| RadioItem {
+                                label: (*label).into(),
+                                ..Default::default()
+                            })
+                            .collect(),
                     }
                     .into(),
-                    StandardItem {
-                        label: "降低".into(),
-                        activate: Box::new(|t: &mut Self| t.send(Command::OpacityDelta(-0.05))),
-                        ..Default::default()
+                    MenuItem::Separator,
+                    item(t.icon_image, |tray| tray.send(Command::BrowseTrayIcon)),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: t.language.into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: lang_index,
+                        select: Box::new(|tray: &mut Self, index: usize| {
+                            tray.send(Command::SetLanguage(if index == 1 {
+                                Lang::En
+                            } else {
+                                Lang::Zh
+                            }));
+                        }),
+                        options: [Lang::Zh, Lang::En]
+                            .iter()
+                            .map(|lang| RadioItem {
+                                label: lang.label().into(),
+                                ..Default::default()
+                            })
+                            .collect(),
                     }
                     .into(),
                 ],
@@ -309,12 +368,7 @@ impl Tray for CatickTray {
             }
             .into(),
             MenuItem::Separator,
-            StandardItem {
-                label: "退出".into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::Quit)),
-                ..Default::default()
-            }
-            .into(),
+            item(t.quit, |tray| tray.send(Command::Quit)),
         ]
     }
 
@@ -331,8 +385,8 @@ pub fn spawn(state: TrayState) -> Result<TrayChannels, Box<dyn std::error::Error
     rustix::fs::fcntl_setfl(&wake_read, rustix::fs::OFlags::NONBLOCK)?;
     let tray = CatickTray {
         state,
-        tx,
-        wake: wake_write,
+        tx: tx.clone(),
+        wake: wake_write.try_clone()?,
     };
     // 没有 watcher 时不报错退出，而是等待宿主出现（niri + 无托盘栏的场景）
     let handle = tray.assume_sni_available(true).spawn()?;
@@ -340,20 +394,46 @@ pub fn spawn(state: TrayState) -> Result<TrayChannels, Box<dyn std::error::Error
         handle,
         rx,
         wake_read,
+        tx,
+        wake_write,
     })
 }
 
 /// 依据当前计时状态构造托盘状态（含图标渲染）。
-pub fn build_state(cfg: &Config, timer: &Timer, style: &Style, fonts: &[String]) -> TrayState {
+pub fn build_state(
+    cfg: &Config,
+    timer: &Timer,
+    style: &Style,
+    fonts: &[String],
+    icon: Option<&crate::icon::IconAnimation>,
+    icon_started: std::time::Duration,
+) -> TrayState {
     let moment = now();
     let display = timer.display(moment);
-    let glyph = render::TrayGlyph {
-        fraction: timer.progress(moment),
-    };
-    // 暂停时图标整体变淡，状态一眼可见
+    // 暂停时整体变淡，状态一眼可见
     let dimmed = !timer.is_running() && timer.mode() != Mode::Clock;
-    let icon_small = render::render_icon(glyph, 22, style.color, dimmed).unwrap_or_default();
-    let icon_big = render::render_icon(glyph, 44, style.color, dimmed).unwrap_or_default();
+
+    let (icon_small, icon_big, icon_is_image) = match (cfg.tray_icon, icon) {
+        (TrayIconKind::Image, Some(anim)) => {
+            let frame = anim.frame_at(icon_started);
+            (
+                anim.render(frame, 22, dimmed).unwrap_or_default(),
+                anim.render(frame, 44, dimmed).unwrap_or_default(),
+                true,
+            )
+        }
+        _ => {
+            let glyph = crate::render::TrayGlyph {
+                fraction: timer.progress(moment),
+            };
+            (
+                crate::render::render_icon(glyph, 22, style.color, dimmed).unwrap_or_default(),
+                crate::render::render_icon(glyph, 44, style.color, dimmed).unwrap_or_default(),
+                false,
+            )
+        }
+    };
+
     TrayState {
         display,
         mode: timer.mode(),
@@ -362,6 +442,8 @@ pub fn build_state(cfg: &Config, timer: &Timer, style: &Style, fonts: &[String])
         click_through: cfg.click_through,
         clock_24h: cfg.clock_24h,
         phase: (timer.mode() == Mode::Pomodoro).then(|| timer.phase()),
+        lang: cfg.language,
+        icon_is_image,
         fonts: fonts.to_vec(),
         current_font: style.family.clone(),
         current_color: normalize_hex(&cfg.color),

@@ -6,7 +6,7 @@
 //! 3. 有变化则 cairo 渲染并贴帧；
 //! 4. 用 poll 等待「后端 fd 可读」或「下一个到期时刻」，无事件无变化时零唤醒。
 
-use crate::config::{Config, Mode, Position};
+use crate::config::{Config, Mode, Position, TrayIconKind};
 use crate::overlay::{Input, Modifiers, Overlay};
 use crate::render::{self, Frame, Style};
 use crate::timer::{self, Timer, TimerEvent};
@@ -53,6 +53,10 @@ pub struct App {
     children: Vec<Child>,
     /// 托盘字体菜单的可选项（启动时探测一次）
     fonts: Vec<String>,
+    /// 图片托盘图标（含 GIF 动画帧）
+    icon: Option<crate::icon::IconAnimation>,
+    /// 图标动画起始时刻（用于按时间取帧）
+    icon_started: Duration,
     /// 系统托盘（可能因缺少 SNI 宿主而未启动）
     tray: Option<TrayChannels>,
     /// 上次推送给托盘的显示键，用于避免无谓的 D-Bus 往返
@@ -72,6 +76,21 @@ macro_rules! debug_log {
             eprintln!("catick[debug]: {}", format!($($arg)*));
         }
     };
+}
+
+/// 按配置加载图片托盘图标（失败只记日志，回退进度环）。
+fn load_icon(cfg: &Config) -> Option<crate::icon::IconAnimation> {
+    if cfg.tray_icon != TrayIconKind::Image {
+        return None;
+    }
+    let path = cfg.tray_icon_path.as_deref()?;
+    match crate::icon::load(std::path::Path::new(path)) {
+        Ok(anim) => Some(anim),
+        Err(err) => {
+            eprintln!("catick: 托盘图片 {path} 加载失败：{err}");
+            None
+        }
+    }
 }
 
 /// 把窗口位置夹取到屏幕范围内（整个窗口可见）。
@@ -134,9 +153,20 @@ impl App {
         let now = timer::now();
         let timer = Timer::new(&cfg, now);
 
+        // 自定义字体文件：注册进 fontconfig 后按家族名渲染
+        let mut style = style;
+        if let Some(path) = cfg.font_path.clone() {
+            match crate::render::register_font_file(&path) {
+                Some(family) => style.family = family,
+                None => eprintln!("catick: 字体文件 {path} 注册失败，回退到 {}", style.family),
+            }
+        }
         let fonts = crate::config::available_fonts(&style.family);
+        let icon = load_icon(&cfg);
+        let icon_started = timer::now();
         let tray = if cfg.tray {
-            let state = tray::build_state(&cfg, &timer, &style, &fonts);
+            let state =
+                tray::build_state(&cfg, &timer, &style, &fonts, icon.as_ref(), icon_started);
             match tray::spawn(state) {
                 Ok(channels) => Some(channels),
                 Err(err) => {
@@ -170,6 +200,8 @@ impl App {
             edit_mode,
             drag: None,
             fonts,
+            icon,
+            icon_started,
             phys_w,
             phys_h,
             quit: false,
@@ -200,10 +232,16 @@ impl App {
             if let Some(tray) = &self.tray {
                 fds.push(PollFd::new(&tray.wake_read, PollFlags::IN));
             }
-            let timeout = self
+            let mut timeout = self
                 .timer
                 .next_update(now)
                 .map_or(MAX_TIMEOUT, |d| d.clamp(MIN_TIMEOUT, MAX_TIMEOUT));
+            // 动画图标需要按帧唤醒
+            if let Some(anim) = &self.icon
+                && let Some(next) = anim.next_frame_in(self.icon_started)
+            {
+                timeout = timeout.min(next.clamp(MIN_TIMEOUT, MAX_TIMEOUT));
+            }
             let ts = Timespec::try_from(timeout)?;
             match poll(&mut fds, Some(&ts)) {
                 Ok(_) => {}
@@ -250,6 +288,7 @@ impl App {
         while rustix::io::read(&tray.wake_read, &mut buf).is_ok() {}
         let commands: Vec<Command> = tray.rx.try_iter().collect();
         for cmd in commands {
+            debug_log!("托盘命令: {cmd:?}");
             if self.apply_command(cmd, now)? {
                 return Ok(true);
             }
@@ -309,7 +348,9 @@ impl App {
             }
             Command::SetFont(font) => {
                 self.style.family = font.clone();
+                self.style.path = None;
                 self.cfg.font_family = font;
+                self.cfg.font_path = None;
                 self.dirty = true;
                 persist = true;
             }
@@ -320,6 +361,64 @@ impl App {
                     self.dirty = true;
                     persist = true;
                 }
+            }
+            Command::BrowseFont => {
+                self.spawn_pick(|| {
+                    crate::picker::pick_file(
+                        "选择字体文件",
+                        "字体",
+                        &["*.ttf", "*.otf", "*.ttc"],
+                        "/usr/share/fonts",
+                    )
+                    .map(|path| Command::SetFontFile(path.to_string_lossy().into_owned()))
+                });
+            }
+            Command::SetFontFile(path) => match crate::render::register_font_file(&path) {
+                Some(family) => {
+                    self.style.path = Some(path.clone());
+                    self.style.family = family.clone();
+                    self.cfg.font_path = Some(path);
+                    self.cfg.font_family = family;
+                    self.dirty = true;
+                    persist = true;
+                }
+                None => eprintln!("catick: 字体文件 {path} 注册失败"),
+            },
+            Command::SetTrayIcon(kind) => {
+                self.cfg.tray_icon = kind;
+                self.dirty = true;
+                persist = true;
+                if kind == TrayIconKind::Image && self.icon.is_none() {
+                    // 选了图片但还没指定文件：直接弹选择框
+                    return self.apply_command(Command::BrowseTrayIcon, now);
+                }
+            }
+            Command::BrowseTrayIcon => {
+                self.spawn_pick(|| {
+                    crate::picker::pick_file(
+                        "选择托盘图标图片",
+                        "图片",
+                        &["*.png", "*.gif", "*.jpg", "*.jpeg"],
+                        "",
+                    )
+                    .map(|path| Command::SetTrayIconFile(path.to_string_lossy().into_owned()))
+                });
+            }
+            Command::SetTrayIconFile(path) => {
+                match crate::icon::load(std::path::Path::new(&path)) {
+                    Ok(anim) => {
+                        self.icon = Some(anim);
+                        self.icon_started = now;
+                        self.cfg.tray_icon = TrayIconKind::Image;
+                        self.cfg.tray_icon_path = Some(path);
+                        persist = true;
+                    }
+                    Err(err) => eprintln!("catick: 加载托盘图片失败：{err}"),
+                }
+            }
+            Command::SetLanguage(lang) => {
+                self.cfg.language = lang;
+                persist = true;
             }
             Command::Quit => {
                 self.shutdown_tray();
@@ -335,8 +434,13 @@ impl App {
     /// 显示文本 / 交互状态变化时才把新状态推给托盘。
     fn update_tray(&mut self, now: Duration) {
         let Some(tray) = &self.tray else { return };
+        let anim_frame = self
+            .icon
+            .as_ref()
+            .map(|anim| anim.frame_at(self.icon_started).to_string())
+            .unwrap_or_default();
         let key = format!(
-            "{}|{}|{:?}|{}|{}|{:.1}|{:.2}|{:?}",
+            "{}|{}|{:?}|{}|{}|{:.1}|{:.2}|{:?}|{anim_frame}|{:?}|{}",
             self.timer.display(now),
             self.timer.is_running(),
             self.cfg.mode,
@@ -345,12 +449,21 @@ impl App {
             self.style.size,
             self.style.opacity,
             (self.timer.mode() == Mode::Pomodoro).then(|| self.timer.phase()),
+            self.cfg.language,
+            self.cfg.tray_icon_path.as_deref().unwrap_or(""),
         );
         if key == self.tray_key {
             return;
         }
         self.tray_key = key;
-        let mut state = tray::build_state(&self.cfg, &self.timer, &self.style, &self.fonts);
+        let mut state = tray::build_state(
+            &self.cfg,
+            &self.timer,
+            &self.style,
+            &self.fonts,
+            self.icon.as_ref(),
+            self.icon_started,
+        );
         state.edit_mode = self.edit_mode;
         tray.handle.update(|t| t.state = state);
     }
@@ -493,6 +606,27 @@ impl App {
         Ok(())
     }
 
+    /// 在后台线程调用文件选择框（对话框会阻塞），结果经命令通道送回主循环。
+    fn spawn_pick<F>(&self, pick: F)
+    where
+        F: FnOnce() -> Option<Command> + Send + 'static,
+    {
+        let Some(tray) = &self.tray else {
+            eprintln!("catick: 未启用托盘，无法弹出文件选择框");
+            return;
+        };
+        let tx = tray.tx.clone();
+        let Ok(wake) = tray.wake_write.try_clone() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            if let Some(cmd) = pick() {
+                let _ = tx.send(cmd);
+                let _ = rustix::io::write(&wake, b"c");
+            }
+        });
+    }
+
     /// 只把界面上调整过的字段写回磁盘配置，
     /// 避免把 `--time` / `--font` 这类一次性 CLI 覆盖固化进配置文件。
     fn persist(&mut self) {
@@ -505,7 +639,11 @@ impl App {
         disk.click_through = self.cfg.click_through;
         disk.clock_24h = self.cfg.clock_24h;
         disk.font_family = self.cfg.font_family.clone();
+        disk.font_path = self.cfg.font_path.clone();
         disk.color = self.cfg.color.clone();
+        disk.tray_icon = self.cfg.tray_icon;
+        disk.tray_icon_path = self.cfg.tray_icon_path.clone();
+        disk.language = self.cfg.language;
         disk.save();
     }
 

@@ -24,10 +24,14 @@ that floats above your windows, and is fully controllable from the system tray.
     KDE…), crisp on HiDPI thanks to fractional-scale support.
   - **X11** — a depth-32 ARGB window via x11rb, for X11 desktops and other
     compositors' XWayland.
-- **System tray (StatusNotifierItem)** — a vector icon (progress ring for
-  timers, clock face for clock mode) shows the state at a glance, and the menu
-  has everything: modes, quick presets, pause/reset, edit mode, click-through,
+- **System tray (StatusNotifierItem)** — a live progress ring, or your own
+  image (PNG / JPEG / **animated GIF**) picked from a file dialog. The menu has
+  everything: modes, quick presets, pause/reset, edit mode, click-through,
   12/24-hour clock, font picker, color presets, font size, opacity, quit.
+- **Fonts your way** — pick from installed families or choose any font file
+  (`.ttf` / `.otf`) through the system file dialog; the file's own weight wins.
+- **English / 中文** — the interface follows `$LANG` and can be switched from
+  the tray; the choice is remembered.
 - **Edit mode** — drag to move, scroll to resize the font, Ctrl+scroll for
   opacity; everything is saved as you adjust it.
 - **Config file + CLI overrides** — `~/.config/catick/config.toml` persists
@@ -42,7 +46,7 @@ that floats above your windows, and is fully controllable from the system tray.
 Build from source (Rust 1.92+):
 
 ```sh
-git clone https://github.com/<you>/Catick.git
+git clone https://github.com/leucalin/Catick.git
 cd Catick
 cargo build --release
 ./target/release/Catick          # run it
@@ -52,9 +56,9 @@ System dependencies:
 
 | Distro         | Packages                              |
 | -------------- | ------------------------------------- |
-| Arch Linux     | `sudo pacman -S cairo wayland`        |
-| Ubuntu/Debian  | `sudo apt install libcairo2-dev libwayland-dev pkg-config` |
-| Fedora         | `sudo dnf install cairo-devel wayland-devel pkgconf` |
+| Arch Linux     | `sudo pacman -S cairo wayland fontconfig freetype2` |
+| Ubuntu/Debian  | `sudo apt install libcairo2-dev libwayland-dev libfontconfig1-dev libfreetype-dev pkg-config` |
+| Fedora         | `sudo dnf install cairo-devel wayland-devel fontconfig-devel freetype-devel pkgconf` |
 
 On first run a default config is written to `~/.config/catick/config.toml`.
 A 25-minute countdown starts right away, just like Catime's first launch.
@@ -75,6 +79,9 @@ none is possible for an overlay).
 | Ctrl + scroll in edit mode      | Opacity ±5% ¹                            |
 | Tray left click                 | Enter / exit edit mode                   |
 | Tray right click                | Menu (modes, presets, fonts, colors, …)  |
+
+File dialogs are opened with `zenity` (falling back to `kdialog`) — install one
+of them if you want to pick icons or font files from the tray.
 
 ¹ Modifier combos need pointer modifier state, which Wayland does not deliver
 to overlays. There, use the tray menu's font-size and opacity items instead.
@@ -99,6 +106,10 @@ click_through = true
 tray = true
 backend = "auto"            # auto | wayland | x11
 position = { x = 900, y = 200 }
+font_path = ""              # 自定义字体文件（ttf/otf），优先于 font_family
+tray_icon = "ring"          # ring | image
+tray_icon_path = ""         # 图片图标（png / gif / jpg，gif 会动）
+language = "auto"           # auto | zh | en
 on_finish_cmd = "notify-send Catick \"Time's up!\""
 edit_on_start = false
 

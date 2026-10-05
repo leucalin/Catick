@@ -41,6 +41,10 @@ rendered with cairo, controlled by mouse and a StatusNotifierItem tray.
   are computed against the compositor's *applied* position, so virtual root
   coordinates must use the `wl_display.sync`-confirmed position, never the
   locally submitted one (that double-counts moves and flings the window).
+  During a drag, absolute `wl_pointer.motion` **must be ignored** while
+  `zwp_relative_pointer_v1` deltas drive the movement — mixing both makes the
+  window fly away. `examples/winject.rs` (zwlr_virtual_pointer) reproduces
+  drags on niri: injecting 100x50 must move the window exactly 100x50.
 - `src/app.rs` — the event loop: drain backend events, tick the timer, redraw
   on change, then `poll([backend fd, tray wake pipe])` with a timeout from
   `Timer::next_update`. Everything else (interactions, edit mode, persistence)
@@ -51,6 +55,15 @@ rendered with cairo, controlled by mouse and a StatusNotifierItem tray.
   true zero.
 - `src/render.rs` — cairo rendering; `TEMPLATE` (`88:88:88`) fixes the window
   size so digits don't jitter it. `render_icon` outputs SNI network-order ARGB.
+  Custom font files are registered through fontconfig
+  (`register_font_file`) and then selected by family name — never hand a
+  freetype `FT_Face` to `cairo::FontFace::create_from_ft`, cairo keeps its own
+  FT library and cross-library faces abort the process.
+- `src/icon.rs` — decodes PNG (cairo), GIF (animated, frames cached as cairo
+  surfaces) and JPEG (zune-jpeg) for the image tray icon.
+- `src/i18n.rs` / `src/picker.rs` — zh/en strings and the zenity/kdialog file
+  dialog (always invoked from a worker thread; the result comes back as a
+  `tray::Command`).
 - `src/tray.rs` — ksni tray on its own thread; the icon is a cairo-drawn
   vector glyph (`render::TrayGlyph`), and the menu carries font (from
   `fc-list`) and color-preset pickers. **Callbacks may only send to the

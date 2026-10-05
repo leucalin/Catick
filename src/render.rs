@@ -16,6 +16,8 @@ pub const TEMPLATE: &str = "88:88:88";
 #[derive(Debug, Clone)]
 pub struct Style {
     pub family: String,
+    /// 自定义字体文件路径（优先于 family）
+    pub path: Option<String>,
     pub size: f64,
     pub bold: bool,
     pub color: (f64, f64, f64),
@@ -27,8 +29,10 @@ impl Style {
     pub fn from_config(cfg: &Config) -> Self {
         Style {
             family: cfg.font_family.clone(),
+            path: cfg.font_path.clone(),
+            // 指定字体文件时以文件自身的字重为准（不再强制加粗，避免合成加粗）
+            bold: cfg.bold && cfg.font_path.is_none(),
             size: cfg.font_size,
-            bold: cfg.bold,
             color: cfg.color_rgb(),
             opacity: cfg.opacity.clamp(0.0, 1.0),
         }
@@ -199,4 +203,42 @@ fn apply_font(cr: &Context, style: &Style) {
     };
     cr.select_font_face(&style.family, FontSlant::Normal, weight);
     cr.set_font_size(style.size);
+}
+
+/// 把字体文件注册进本进程的 fontconfig，返回其家族名。
+///
+/// 不直接拿 freetype 的 `FT_Face` 去建 cairo `FontFace`：cairo 自己持有一个
+/// FT 库实例，跨库传入 face 会导致断言崩溃。注册到 fontconfig 后，cairo 的
+/// toy API 就能按家族名正常选中它。
+pub fn register_font_file(path: &str) -> Option<String> {
+    use std::ffi::{CString, c_char, c_int, c_void};
+
+    #[link(name = "fontconfig")]
+    unsafe extern "C" {
+        fn FcInit();
+        fn FcConfigGetCurrent() -> *mut c_void;
+        fn FcConfigAppFontAddFile(config: *mut c_void, file: *const c_char) -> c_int;
+    }
+
+    // 家族名从文件里读（freetype 只用来读取名字，不参与渲染）
+    let family = {
+        let library = cairo::freetype::Library::init().ok()?;
+        let face = library.new_face(path, 0).ok()?;
+        face.family_name()?
+    };
+
+    let c_path = CString::new(path).ok()?;
+    // SAFETY: 传入的都是合法指针；FcInit 可重复调用
+    let added = unsafe {
+        FcInit();
+        let config = FcConfigGetCurrent();
+        if config.is_null() {
+            return None;
+        }
+        FcConfigAppFontAddFile(config, c_path.as_ptr())
+    };
+    if added == 0 {
+        return None;
+    }
+    Some(family)
 }

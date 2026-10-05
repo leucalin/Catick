@@ -3,9 +3,21 @@
 //! 配置全部字段都有默认值，缺失文件或字段时使用默认值启动；
 //! 解析失败的文件会被备份为 `config.toml.bak`，避免后续保存覆盖用户数据。
 
+use crate::i18n::Lang;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// 托盘图标形态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum TrayIconKind {
+    /// 进度环（矢量绘制）
+    #[default]
+    Ring,
+    /// 图片（png / gif / jpg，gif 会动）
+    Image,
+}
 
 /// 计时模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -72,6 +84,8 @@ pub struct Config {
     /// 倒计时默认时长，如 "25m" / "90s" / "1h30m" / "25:00"
     pub duration: String,
     pub font_family: String,
+    /// 自定义字体文件（ttf/otf）；设置后优先于 `font_family`
+    pub font_path: Option<String>,
     pub font_size: f64,
     pub bold: bool,
     /// 文字颜色，`#rrggbb`
@@ -86,6 +100,11 @@ pub struct Config {
     pub edit_on_start: bool,
     /// 启用系统托盘（StatusNotifierItem）
     pub tray: bool,
+    /// 托盘图标形态与图片路径
+    pub tray_icon: TrayIconKind,
+    pub tray_icon_path: Option<String>,
+    /// 界面语言（auto 按 $LANG 判断）
+    pub language: Lang,
     pub backend: Backend,
     /// 窗口位置；None 表示居中偏上
     pub position: Option<Position>,
@@ -100,6 +119,7 @@ impl Default for Config {
             mode: Mode::Countdown,
             duration: "25m".into(),
             font_family: "monospace".into(),
+            font_path: None,
             font_size: 72.0,
             bold: true,
             color: "#ffffff".into(),
@@ -108,6 +128,9 @@ impl Default for Config {
             click_through: true,
             edit_on_start: false,
             tray: true,
+            tray_icon: TrayIconKind::Ring,
+            tray_icon_path: None,
+            language: Lang::Auto,
             backend: Backend::Auto,
             position: None,
             on_finish_cmd: Some("notify-send Catick \"Time's up!\"".into()),
@@ -250,20 +273,20 @@ pub fn parse_color(input: &str) -> Option<(f64, f64, f64)> {
     }
 }
 
-/// 托盘菜单提供的颜色预设（名称, `#rrggbb`）。
-pub const COLOR_PRESETS: [(&str, &str); 12] = [
-    ("白色", "#ffffff"),
-    ("黑色", "#000000"),
-    ("灰色", "#9ca3af"),
-    ("红色", "#ff5555"),
-    ("橙色", "#ff9f43"),
-    ("黄色", "#f9ca45"),
-    ("绿色", "#2ecc71"),
-    ("青色", "#22d3ee"),
-    ("蓝色", "#4f8cff"),
-    ("紫色", "#a78bfa"),
-    ("粉色", "#ff7ab6"),
-    ("棕色", "#b08968"),
+/// 托盘菜单提供的颜色预设（中文名, 英文名, `#rrggbb`）。
+pub const COLOR_PRESETS: [(&str, &str, &str); 12] = [
+    ("白色", "White", "#ffffff"),
+    ("黑色", "Black", "#000000"),
+    ("灰色", "Gray", "#9ca3af"),
+    ("红色", "Red", "#ff5555"),
+    ("橙色", "Orange", "#ff9f43"),
+    ("黄色", "Yellow", "#f9ca45"),
+    ("绿色", "Green", "#2ecc71"),
+    ("青色", "Cyan", "#22d3ee"),
+    ("蓝色", "Blue", "#4f8cff"),
+    ("紫色", "Purple", "#a78bfa"),
+    ("粉色", "Pink", "#ff7ab6"),
+    ("棕色", "Brown", "#b08968"),
 ];
 
 /// 托盘字体候选：通用族 + 常见等宽/数字字体 ∩ 系统已安装（经 `fc-list`）。

@@ -1,6 +1,9 @@
 mod app;
 mod config;
+mod i18n;
+mod icon;
 mod overlay;
+mod picker;
 mod render;
 mod timer;
 mod tray;
