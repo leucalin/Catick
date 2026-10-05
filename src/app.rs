@@ -10,6 +10,7 @@ use crate::config::{Config, Mode, Position};
 use crate::overlay::{Input, Modifiers, Overlay};
 use crate::render::{self, Frame, Style};
 use crate::timer::{self, Timer, TimerEvent};
+use crate::tray::{self, Command, TrayChannels};
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::time::Timespec;
 use std::error::Error;
@@ -45,12 +46,27 @@ pub struct App {
     drag: Option<Drag>,
     /// on_finish_cmd 的子进程，定期回收防僵尸
     children: Vec<Child>,
+    /// 系统托盘（可能因缺少 SNI 宿主而未启动）
+    tray: Option<TrayChannels>,
+    /// 上次推送给托盘的显示键，用于避免无谓的 D-Bus 往返
+    tray_key: String,
 }
 
 struct Drag {
     press_root: (i32, i32),
     win_pos: (i32, i32),
     moved: bool,
+}
+
+/// 秒数转配置文件里的人类可读写法（3600 → "1h"）。
+fn format_duration(secs: u64) -> String {
+    if secs.is_multiple_of(3600) {
+        format!("{}h", secs / 3600)
+    } else if secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 impl App {
@@ -74,6 +90,19 @@ impl App {
         let now = timer::now();
         let timer = Timer::new(&cfg, now);
 
+        let tray = if cfg.tray {
+            let state = tray::build_state(&cfg, &timer, &style);
+            match tray::spawn(state) {
+                Ok(channels) => Some(channels),
+                Err(err) => {
+                    eprintln!("catick: 托盘不可用（{err}），以无托盘模式继续");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(App {
             cfg,
             ov,
@@ -87,6 +116,8 @@ impl App {
             edit_mode,
             drag: None,
             children: Vec::new(),
+            tray,
+            tray_key: String::new(),
         })
     }
 
@@ -100,9 +131,6 @@ impl App {
             );
         }
         // SAFETY: fd 由 ov 持有，在 ov 存活期间始终有效
-        let fd = unsafe { BorrowedFd::borrow_raw(self.ov.event_fd()) };
-        let mut fds = [PollFd::new(&fd, PollFlags::IN)];
-
         loop {
             let now = timer::now();
 
@@ -113,6 +141,7 @@ impl App {
                 self.handle_timer_event(event);
             }
             self.redraw_if_needed()?;
+            self.update_tray(now);
             self.ov.flush()?;
             self.reap_children();
 
@@ -121,12 +150,124 @@ impl App {
                 .next_update(now)
                 .map_or(MAX_TIMEOUT, |d| d.clamp(MIN_TIMEOUT, MAX_TIMEOUT));
             let ts = Timespec::try_from(timeout)?;
-            match poll(&mut fds, Some(&ts)) {
-                Ok(_) => {}
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(err) => return Err(err.into()),
+            {
+                let backend_fd = unsafe { BorrowedFd::borrow_raw(self.ov.event_fd()) };
+                let mut fds = vec![PollFd::new(&backend_fd, PollFlags::IN)];
+                if let Some(tray) = &self.tray {
+                    fds.push(PollFd::new(&tray.wake_read, PollFlags::IN));
+                }
+                match poll(&mut fds, Some(&ts)) {
+                    Ok(_) => {}
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+
+            if self.handle_tray_commands(now)? {
+                return Ok(());
             }
         }
+    }
+
+    /// 清空唤醒管道 + 执行托盘命令；返回是否退出。
+    fn handle_tray_commands(&mut self, now: Duration) -> Result<bool, Box<dyn Error>> {
+        let Some(tray) = &self.tray else {
+            return Ok(false);
+        };
+        let mut buf = [0u8; 64];
+        while rustix::io::read(&tray.wake_read, &mut buf).is_ok() {}
+        let commands: Vec<Command> = tray.rx.try_iter().collect();
+        for cmd in commands {
+            if self.apply_command(cmd, now)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn apply_command(&mut self, cmd: Command, now: Duration) -> Result<bool, Box<dyn Error>> {
+        let mut persist = false;
+        match cmd {
+            Command::TogglePause => {
+                self.timer.toggle(now);
+                self.dirty = true;
+            }
+            Command::Reset => {
+                self.timer.reset();
+                self.dirty = true;
+            }
+            Command::SetMode(mode) => {
+                self.timer.set_mode(mode, now);
+                self.cfg.mode = mode;
+                self.dirty = true;
+                persist = true;
+            }
+            Command::SetPreset(secs) => {
+                self.timer.set_preset(now, secs);
+                self.cfg.mode = Mode::Countdown;
+                self.cfg.duration = format_duration(secs);
+                self.dirty = true;
+                persist = true;
+            }
+            Command::ToggleEditMode => self.toggle_edit_mode()?,
+            Command::ToggleClickThrough => {
+                self.cfg.click_through = !self.cfg.click_through;
+                self.ov.set_passthrough(self.cfg.click_through && !self.edit_mode)?;
+                persist = true;
+            }
+            Command::ToggleClockFormat => {
+                self.cfg.clock_24h = !self.cfg.clock_24h;
+                self.timer.set_clock_24h(self.cfg.clock_24h);
+                self.dirty = true;
+                persist = true;
+            }
+            Command::FontSizeDelta(delta) => {
+                self.style.size = (self.style.size + delta).clamp(FONT_MIN, FONT_MAX);
+                self.cfg.font_size = self.style.size;
+                self.resize_keep_center()?;
+                persist = true;
+            }
+            Command::OpacityDelta(delta) => {
+                let v = self.style.opacity + delta;
+                self.style.opacity = (v.clamp(OPACITY_MIN, 1.0) * 100.0).round() / 100.0;
+                self.cfg.opacity = self.style.opacity;
+                self.dirty = true;
+                persist = true;
+            }
+            Command::Quit => {
+                if let Some(tray) = &self.tray {
+                    tray.handle.shutdown().wait();
+                }
+                return Ok(true);
+            }
+        }
+        if persist {
+            self.persist();
+        }
+        Ok(false)
+    }
+
+    /// 显示文本 / 交互状态变化时才把新状态推给托盘。
+    fn update_tray(&mut self, now: Duration) {
+        let Some(tray) = &self.tray else { return };
+        let key = format!(
+            "{}|{}|{:?}|{}|{}|{:.1}|{:.2}|{:?}",
+            self.timer.display(now),
+            self.timer.is_running(),
+            self.cfg.mode,
+            self.edit_mode,
+            self.cfg.click_through,
+            self.style.size,
+            self.style.opacity,
+            (self.timer.mode() == Mode::Pomodoro).then(|| self.timer.phase()),
+        );
+        if key == self.tray_key {
+            return;
+        }
+        self.tray_key = key;
+        let mut state = tray::build_state(&self.cfg, &self.timer, &self.style);
+        state.edit_mode = self.edit_mode;
+        tray.handle.update(|t| t.state = state);
     }
 
     fn handle_input(&mut self, ev: Input, now: Duration) -> Result<(), Box<dyn Error>> {
@@ -259,6 +400,10 @@ impl App {
         disk.position = self.cfg.position;
         disk.font_size = self.cfg.font_size;
         disk.opacity = self.cfg.opacity;
+        disk.mode = self.cfg.mode;
+        disk.duration = self.cfg.duration.clone();
+        disk.click_through = self.cfg.click_through;
+        disk.clock_24h = self.cfg.clock_24h;
         disk.save();
     }
 

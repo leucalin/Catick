@@ -3,6 +3,7 @@ mod config;
 mod overlay;
 mod render;
 mod timer;
+mod tray;
 mod wayland;
 mod x11;
 

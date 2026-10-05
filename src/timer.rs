@@ -123,6 +123,20 @@ impl Timer {
         }
     }
 
+    /// 切换 12/24 小时制（时钟模式）。
+    pub fn set_clock_24h(&mut self, on: bool) {
+        self.clock_24h = on;
+    }
+
+    /// 快捷预设：设定倒计时时长并立即从该时长开始运行。
+    pub fn set_preset(&mut self, now: Duration, secs: u64) {
+        self.mode = Mode::Countdown;
+        self.duration = Duration::from_secs(secs.max(1));
+        self.remaining = self.duration;
+        self.finished = false;
+        self.end = Some(now + self.duration);
+    }
+
     pub fn is_finished(&self) -> bool {
         self.finished
     }

@@ -116,6 +116,63 @@ pub fn render(
     })
 }
 
+/// 渲染托盘图标：正方形、透明底、居中的小号文字，输出网络字节序 ARGB32
+/// （StatusNotifierItem 的 `Icon.data` 约定）。
+pub fn render_icon(
+    text: &str,
+    size: u32,
+    style: &Style,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut surface = ImageSurface::create(Format::ARgb32, size as i32, size as i32)?;
+    let cr = Context::new(&surface)?;
+    cr.set_operator(Operator::Clear);
+    cr.paint()?;
+    cr.set_operator(Operator::Source);
+
+    // 先按 100px 量一遍，再缩放到刚好塞进图标（留 2px 边距）
+    let probe = Style {
+        size: 100.0,
+        opacity: 1.0,
+        ..style.clone()
+    };
+    apply_font(&cr, &probe);
+    let te = cr.text_extents(text)?;
+    let fe = cr.font_extents()?;
+    let fit_w = (size as f64 - 4.0) / te.x_advance().max(1.0);
+    let fit_h = (size as f64 - 4.0) / fe.height().max(1.0);
+    let probe_size = 100.0 * fit_w.min(fit_h);
+    let icon_style = Style {
+        size: probe_size,
+        opacity: 1.0,
+        ..style.clone()
+    };
+    apply_font(&cr, &icon_style);
+    let (r, g, b) = style.color;
+    cr.set_source_rgba(r, g, b, 1.0);
+    let te = cr.text_extents(text)?;
+    let fe = cr.font_extents()?;
+    let x = (size as f64 - te.x_advance()) / 2.0 - te.x_bearing();
+    let y = (size as f64 - fe.height()) / 2.0 + fe.ascent();
+    cr.move_to(x, y);
+    cr.show_text(text)?;
+
+    drop(cr);
+
+    // cairo 原生是小端 BGRA；SNI 需要大端序的 ARGB 字节
+    let stride = surface.stride() as usize;
+    let data = surface.data()?;
+    let row_bytes = size as usize * 4;
+    let mut out = Vec::with_capacity(row_bytes * size as usize);
+    for row in 0..size as usize {
+        let start = row * stride;
+        for px in data[start..start + row_bytes].chunks_exact(4) {
+            let v = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    Ok(out)
+}
+
 /// 把一帧写成 PNG（调试与无显示环境验证用）。
 pub fn dump_png(frame: Frame, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let stride = (frame.width * 4) as i32;

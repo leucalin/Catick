@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 cairo-rs = { version = "0.22", default-features = false, features = ["png"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 x11rb = { version = "0.14.0", features = ["shape", "xtest"] }
 clap = { version = "4", features = ["derive"] }
 rustix = { version = "1", features = ["event", "mm", "pipe", "time"] }
