@@ -12,14 +12,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = conn.setup().roots[screen_num].root;
 
     let win = find_window(&conn, root, "Catick")
-        .ok_or("找不到名为 Catick 的窗口（catick 正在运行吗？）")?;
+        .ok_or("no window named Catick found (is catick running?)")?;
 
     let hash_only = std::env::args().any(|a| a == "--hash");
 
     let geom = conn.get_geometry(win)?.reply()?;
     let (w, h) = (geom.width as u32, geom.height as u32);
     if !hash_only {
-        println!("窗口 {win:#x}: {w}x{h} @ ({},{})", geom.x, geom.y);
+        println!("window {win:#x}: {w}x{h} @ ({},{})", geom.x, geom.y);
     }
 
     let img = conn
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?
         .reply()?;
     if !hash_only {
-        println!("图像 depth={} 数据长度={}", img.depth, img.data.len());
+        println!("image depth={} bytes={}", img.depth, img.data.len());
     }
 
     let sample = |x: u32, y: u32| -> (u8, u8, u8, u8) {
@@ -48,9 +48,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if !hash_only {
         for (label, x, y) in [
-            ("左上角", 0, 0),
-            ("正中", w / 2, h / 2),
-            ("右下角", w - 1, h - 1),
+            ("top-left", 0, 0),
+            ("center", w / 2, h / 2),
+            ("bottom-right", w - 1, h - 1),
         ] {
             let (a, r, g, b) = sample(x, y);
             println!("{label} ({x},{y}): A={a} R={r} G={g} B={b}");
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hasher.finish()
         );
     } else {
-        println!("alpha：最大={max_alpha}，非透明像素 {opaque}/{total}（{pct:.1}%）");
+        println!("alpha: max={max_alpha}, non-transparent {opaque}/{total} ({pct:.1}%)");
     }
     Ok(())
 }

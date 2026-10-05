@@ -78,7 +78,7 @@ pub fn create(cfg: &Config) -> OverlayResult<Box<dyn Overlay>> {
             if std::env::var_os("WAYLAND_DISPLAY").is_some() {
                 match crate::wayland::create() {
                     Ok(ov) => return Ok(ov),
-                    Err(err) => eprintln!("catick: Wayland 后端不可用（{err}），回退 X11"),
+                    Err(err) => eprintln!("catick: Wayland backend unavailable ({err}), falling back to X11"),
                 }
             }
             Ok(Box::new(crate::x11::X11Overlay::new()?))

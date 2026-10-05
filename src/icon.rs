@@ -51,22 +51,13 @@ impl IconAnimation {
     }
 
     /// 把第 `index` 帧缩放到 `size×size`，输出网络字节序 ARGB32（SNI 约定）。
-    pub fn render(
-        &self,
-        index: usize,
-        size: u32,
-        dimmed: bool,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn render(&self, index: usize, size: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let src = &self.frames[index.min(self.frames.len() - 1)];
         let mut target = ImageSurface::create(Format::ARgb32, size as i32, size as i32)?;
         let cr = Context::new(&target)?;
         cr.set_operator(Operator::Clear);
         cr.paint()?;
         cr.set_operator(Operator::Source);
-        if dimmed {
-            // 暂停态整体变淡：画完再叠加一层乘性 alpha
-            cr.push_group();
-        }
         let (sw, sh) = (src.width() as f64, src.height() as f64);
         let scale = (size as f64 / sw).min(size as f64 / sh);
         let (dw, dh) = (sw * scale, sh * scale);
@@ -76,10 +67,6 @@ impl IconAnimation {
         cr.set_source_surface(src, 0.0, 0.0)?;
         cr.paint()?;
         cr.restore()?;
-        if dimmed {
-            cr.pop_group_to_source()?;
-            cr.paint_with_alpha(0.55)?;
-        }
         drop(cr);
 
         // cairo 原生是小端 BGRA；SNI 需要大端序的 ARGB 字节
@@ -108,7 +95,7 @@ pub fn load(path: &Path) -> Result<IconAnimation, Box<dyn std::error::Error>> {
         "png" => load_png(path),
         "gif" => load_gif(path),
         "jpg" | "jpeg" => load_jpeg(path),
-        other => Err(format!("不支持的图片格式：{other}（支持 png / gif / jpg）").into()),
+        other => Err(format!("unsupported image format: {other} (png / gif / jpg)").into()),
     }
 }
 
@@ -122,7 +109,7 @@ fn load_jpeg(path: &Path) -> Result<IconAnimation, Box<dyn std::error::Error>> {
     let data = std::fs::read(path)?;
     let mut decoder = zune_jpeg::JpegDecoder::new(&data[..]);
     let pixels = decoder.decode()?;
-    let (w, h) = decoder.dimensions().ok_or("JPEG 尺寸未知")?;
+    let (w, h) = decoder.dimensions().ok_or("JPEG dimensions unknown")?;
     let (w, h) = (w as u32, h as u32);
     // zune-jpeg 输出 RGB（每像素 3 字节）
     let mut argb = Vec::with_capacity(w as usize * h as usize * 4);
@@ -191,7 +178,7 @@ fn load_gif(path: &Path) -> Result<IconAnimation, Box<dyn std::error::Error>> {
     }
 
     if frames.is_empty() {
-        return Err("GIF 没有可用帧".into());
+        return Err("GIF has no usable frames".into());
     }
     let total: Duration = delays.iter().sum();
     Ok(IconAnimation {

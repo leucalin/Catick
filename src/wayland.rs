@@ -146,7 +146,7 @@ impl WaylandOverlay {
         let fd = {
             let guard = conn
                 .prepare_read()
-                .ok_or("Wayland: 连接暂不可读（初始化阶段不应发生）")?;
+                .ok_or("Wayland: connection not readable yet (unexpected during init)")?;
             let fd = rustix::io::dup(guard.connection_fd())?;
             drop(guard);
             fd
@@ -183,7 +183,7 @@ impl WaylandOverlay {
         let surface = state
             .compositor
             .as_ref()
-            .expect("compositor 已绑定")
+            .expect("compositor is bound")
             .create_surface(&qh, ());
         state.surface = Some(surface.clone());
         if let Some(vp) = &state.viewporter {
@@ -196,7 +196,7 @@ impl WaylandOverlay {
         let layer_surface = state
             .layer_shell
             .as_ref()
-            .expect("layer shell 已绑定")
+            .expect("layer shell is bound")
             .get_layer_surface(
                 &surface,
                 state.output.as_ref(),
@@ -228,7 +228,7 @@ impl WaylandOverlay {
         overlay.wait_configured(Duration::from_secs(5))?;
         if std::env::var_os("CATICK_DEBUG").is_some() {
             eprintln!(
-                "catick[debug]: wayland 能力 seat={} pointer={} relative_mgr={} relative={} fractional={}",
+                "catick[debug]: wayland caps seat={} pointer={} relative_mgr={} relative={} fractional={}",
                 overlay.state.seat.is_some(),
                 overlay.state.pointer.is_some(),
                 overlay.state.relative_mgr.is_some(),
@@ -244,7 +244,7 @@ impl WaylandOverlay {
         let deadline = Instant::now() + timeout;
         while !self.state.configured {
             if Instant::now() > deadline {
-                return Err("Wayland: 等待 layer surface configure 超时".into());
+                return Err("Wayland: timed out waiting for the layer surface configure".into());
             }
             let fd = self.poll_fd();
             // SAFETY: fd 由 self 持有，在 wait_configured 期间保持有效
@@ -284,10 +284,10 @@ impl Overlay for WaylandOverlay {
             && readable
             && let Err(err) = guard.read()
         {
-            eprintln!("catick: Wayland 读取事件失败: {err}");
+            eprintln!("catick: failed to read Wayland events: {err}");
         }
         if let Err(err) = self.queue.dispatch_pending(&mut self.state) {
-            eprintln!("catick: Wayland 分发事件失败: {err}");
+            eprintln!("catick: failed to dispatch Wayland events: {err}");
         }
         let _ = self.conn.flush();
         std::mem::take(&mut self.state.pending)
@@ -337,7 +337,7 @@ impl Overlay for WaylandOverlay {
     fn present(&mut self, buf: &[u8], w: u32, h: u32) -> OverlayResult<()> {
         let (rw, rh) = (w as i32, h as i32);
         if buf.len() < (rw * rh * 4) as usize {
-            return Err(format!("帧缓冲尺寸不足: {} < {rw}x{rh}x4", buf.len()).into());
+            return Err(format!("frame buffer too small: {} < {rw}x{rh}x4", buf.len()).into());
         }
         let stride = rw * 4;
 
@@ -346,14 +346,14 @@ impl Overlay for WaylandOverlay {
         rustix::fs::ftruncate(&file, buf.len() as u64)?;
         rustix::io::write(&file, buf)?;
 
-        let shm = self.state.shm.clone().ok_or("Wayland: 缺少 wl_shm")?;
+        let shm = self.state.shm.clone().ok_or("Wayland: missing wl_shm")?;
         let qh = self.queue.handle();
         let pool = shm.create_pool(file.as_fd(), buf.len() as i32, &qh, ());
         let buffer = pool.create_buffer(0, rw, rh, stride, wl_shm::Format::Argb8888, &qh, ());
         pool.destroy();
         drop(file);
 
-        let surface = self.state.surface.clone().ok_or("Wayland: 缺少 surface")?;
+        let surface = self.state.surface.clone().ok_or("Wayland: missing surface")?;
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, rw, rh);
         if let Some(viewport) = &self.state.viewport {
@@ -375,7 +375,7 @@ impl Overlay for WaylandOverlay {
                 .state
                 .compositor
                 .clone()
-                .ok_or("Wayland: 缺少 compositor")?;
+                .ok_or("Wayland: missing compositor")?;
             let region = compositor.create_region(&self.queue.handle(), ());
             surface.set_input_region(Some(&region));
             region.destroy();

@@ -120,13 +120,12 @@ pub fn render(
     })
 }
 
-/// 渲染托盘图标：矢量进度环（不含文字），输出网络字节序 ARGB32
-/// （StatusNotifierItem 的 `Icon.data` 约定）。
+/// 渲染托盘图标：只有一个进度环（无底环、无文字、无其它装饰），
+/// 输出网络字节序 ARGB32（StatusNotifierItem 的 `Icon.data` 约定）。
 pub fn render_icon(
     glyph: TrayGlyph,
     size: u32,
     color: (f64, f64, f64),
-    dimmed: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let s = size as f64;
     let c = s / 2.0;
@@ -136,20 +135,13 @@ pub fn render_icon(
     cr.paint()?;
     cr.set_operator(Operator::Source);
     let (r, g, b) = color;
-    let full = if dimmed { 0.55 } else { 1.0 };
 
+    // 进度弧：12 点起顺时针，比例 1 时就是完整的一个环
     let ring_width = (s / 9.0).max(1.0);
     let radius = c - ring_width / 2.0 - s / 16.0;
-
-    // 底环
-    cr.set_source_rgba(r, g, b, 0.28);
-    cr.set_line_width(ring_width);
-    cr.arc(c, c, radius, 0.0, std::f64::consts::TAU);
-    cr.stroke()?;
-    // 进度弧：12 点起顺时针
     let frac = glyph.fraction.clamp(0.0, 1.0);
     if frac > 0.0 {
-        cr.set_source_rgba(r, g, b, full);
+        cr.set_source_rgba(r, g, b, 1.0);
         cr.set_line_width(ring_width);
         cr.set_line_cap(cairo::LineCap::Round);
         let start = -std::f64::consts::FRAC_PI_2;

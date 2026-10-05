@@ -87,7 +87,7 @@ fn load_icon(cfg: &Config) -> Option<crate::icon::IconAnimation> {
     match crate::icon::load(std::path::Path::new(path)) {
         Ok(anim) => Some(anim),
         Err(err) => {
-            eprintln!("catick: 托盘图片 {path} 加载失败：{err}");
+            eprintln!("catick: failed to load tray image {path}: {err}");
             None
         }
     }
@@ -158,7 +158,7 @@ impl App {
         if let Some(path) = cfg.font_path.clone() {
             match crate::render::register_font_file(&path) {
                 Some(family) => style.family = family,
-                None => eprintln!("catick: 字体文件 {path} 注册失败，回退到 {}", style.family),
+                None => eprintln!("catick: failed to register font file {path}, falling back to {}", style.family),
             }
         }
         let fonts = crate::config::available_fonts(&style.family);
@@ -170,7 +170,7 @@ impl App {
             match tray::spawn(state) {
                 Ok(channels) => Some(channels),
                 Err(err) => {
-                    eprintln!("catick: 托盘不可用（{err}），以无托盘模式继续");
+                    eprintln!("catick: tray unavailable ({err}), continuing without it");
                     None
                 }
             }
@@ -179,7 +179,7 @@ impl App {
         };
 
         println!(
-            "catick: 后端={} 缩放={:.2} 尺寸={}x{}px @ ({x},{y}) 模式={:?}",
+            "catick: backend={} scale={:.2} size={}x{}px @ ({x},{y}) mode={:?}",
             ov.name(),
             ov.scale(),
             phys_w,
@@ -215,7 +215,7 @@ impl App {
         self.redraw_if_needed()?;
         if self.timer.mode() == Mode::Pomodoro {
             println!(
-                "catick: 番茄钟 · {} · 运行中={}",
+                "catick: pomodoro · {} · running={}",
                 self.timer.phase().label(),
                 self.timer.is_running()
             );
@@ -288,7 +288,7 @@ impl App {
         while rustix::io::read(&tray.wake_read, &mut buf).is_ok() {}
         let commands: Vec<Command> = tray.rx.try_iter().collect();
         for cmd in commands {
-            debug_log!("托盘命令: {cmd:?}");
+            debug_log!("tray command: {cmd:?}");
             if self.apply_command(cmd, now)? {
                 return Ok(true);
             }
@@ -365,8 +365,8 @@ impl App {
             Command::BrowseFont => {
                 self.spawn_pick(|| {
                     crate::picker::pick_file(
-                        "选择字体文件",
-                        "字体",
+                        "Choose a font file",
+                        "Fonts",
                         &["*.ttf", "*.otf", "*.ttc"],
                         "/usr/share/fonts",
                     )
@@ -382,7 +382,7 @@ impl App {
                     self.dirty = true;
                     persist = true;
                 }
-                None => eprintln!("catick: 字体文件 {path} 注册失败"),
+                None => eprintln!("catick: failed to register font file {path}"),
             },
             Command::SetTrayIcon(kind) => {
                 self.cfg.tray_icon = kind;
@@ -396,8 +396,8 @@ impl App {
             Command::BrowseTrayIcon => {
                 self.spawn_pick(|| {
                     crate::picker::pick_file(
-                        "选择托盘图标图片",
-                        "图片",
+                        "Choose a tray icon image",
+                        "Images",
                         &["*.png", "*.gif", "*.jpg", "*.jpeg"],
                         "",
                     )
@@ -413,12 +413,20 @@ impl App {
                         self.cfg.tray_icon_path = Some(path);
                         persist = true;
                     }
-                    Err(err) => eprintln!("catick: 加载托盘图片失败：{err}"),
+                    Err(err) => eprintln!("catick: failed to load tray image: {err}"),
                 }
             }
             Command::SetLanguage(lang) => {
                 self.cfg.language = lang;
                 persist = true;
+            }
+            Command::OpenConfigDir => {
+                // 用系统文件管理器打开配置目录（后台进程，不阻塞主循环）
+                if let Some(dir) = crate::config::Config::path().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    && let Err(err) = std::process::Command::new("xdg-open").arg(&dir).spawn()
+                {
+                    eprintln!("catick: failed to open {}: {err}", dir.display());
+                }
             }
             Command::Quit => {
                 self.shutdown_tray();
@@ -612,7 +620,7 @@ impl App {
         F: FnOnce() -> Option<Command> + Send + 'static,
     {
         let Some(tray) = &self.tray else {
-            eprintln!("catick: 未启用托盘，无法弹出文件选择框");
+            eprintln!("catick: tray disabled, cannot open a file dialog");
             return;
         };
         let tx = tray.tx.clone();
@@ -660,7 +668,7 @@ impl App {
         };
         match std::process::Command::new("sh").arg("-c").arg(&cmd).spawn() {
             Ok(child) => self.children.push(child),
-            Err(err) => eprintln!("catick: 执行 on_finish_cmd 失败: {err}"),
+            Err(err) => eprintln!("catick: failed to run on_finish_cmd: {err}"),
         }
     }
 

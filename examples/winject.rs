@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "用法: winject abs X Y [EX EY] | rel DX DY [N] | drag X1 Y1 X2 Y2 [EX EY] | click N"
+                "usage: winject abs X Y [EX EY] | rel DX DY [N] | drag X1 Y1 X2 Y2 [EX EY] | click N"
             );
             std::process::exit(2);
         }

@@ -35,7 +35,7 @@ pub fn pick_file(
         return parse_path(out);
     }
 
-    eprintln!("catick: 未找到 zenity / kdialog，无法弹出文件选择框");
+    eprintln!("catick: neither zenity nor kdialog found; cannot open a file dialog");
     None
 }
 

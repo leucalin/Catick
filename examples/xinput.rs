@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "用法: xinput move X Y | click N | scroll N | key down/up KEYCODE | drag X1 Y1 X2 Y2"
+                "usage: xinput move X Y | click N | scroll N | key down/up KEYCODE | drag X1 Y1 X2 Y2"
             );
             std::process::exit(2);
         }

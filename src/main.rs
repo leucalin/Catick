@@ -14,50 +14,50 @@ use clap::Parser;
 use config::{Backend, Config, Mode, Position};
 use std::path::PathBuf;
 
-/// Catime 风格的 Linux 桌面计时器：透明悬浮窗 + 系统托盘。
+/// A Catime-style desktop timer for Linux: transparent overlay + system tray.
 #[derive(Parser, Debug)]
 #[command(name = "catick", version, about)]
 struct Cli {
-    /// 计时模式
+    /// Timer mode
     #[arg(long, value_enum)]
     mode: Option<Mode>,
-    /// 倒计时时长，如 25m / 90s / 1h30m / 25:00
+    /// Countdown duration, e.g. 25m / 90s / 1h30m / 25:00
     #[arg(long, value_name = "DURATION")]
     time: Option<String>,
-    /// 字体族
+    /// Font family
     #[arg(long)]
     font: Option<String>,
-    /// 字号（像素）
+    /// Font size in pixels
     #[arg(long, value_name = "PX")]
     font_size: Option<f64>,
-    /// 文字颜色，#rrggbb
+    /// Text color, #rrggbb
     #[arg(long)]
     color: Option<String>,
-    /// 不透明度 0.0 ~ 1.0
+    /// Opacity, 0.0 - 1.0
     #[arg(long)]
     opacity: Option<f64>,
-    /// 窗口后端
+    /// Window backend
     #[arg(long, value_enum)]
     backend: Option<Backend>,
-    /// 窗口位置，如 100,100
+    /// Window position, e.g. 100,100
     #[arg(long, value_name = "X,Y")]
     position: Option<String>,
-    /// 鼠标穿透：窗口不拦截桌面操作（配置文件默认开启）
+    /// Click-through: the window ignores the mouse (on by default)
     #[arg(long, conflicts_with = "interactive")]
     click_through: bool,
-    /// 可交互：窗口接收鼠标（关闭鼠标穿透）
+    /// Interactive: the window receives mouse events (disables click-through)
     #[arg(long)]
     interactive: bool,
-    /// 启动即进入编辑模式
+    /// Start in edit mode
     #[arg(long)]
     edit: bool,
-    /// 不启动系统托盘
+    /// Do not start the system tray
     #[arg(long)]
     no_tray: bool,
-    /// 把当前渲染的一帧输出为 PNG 后退出（调试用）
+    /// Write one rendered frame to a PNG and exit (debug)
     #[arg(long, value_name = "PATH")]
     dump_png: Option<PathBuf>,
-    /// 打印生效后的配置（TOML）后退出
+    /// Print the effective config (TOML) and exit
     #[arg(long)]
     dump_config: bool,
 }
@@ -119,7 +119,7 @@ fn acquire_single_instance() -> Result<std::fs::File, Box<dyn std::error::Error>
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => {
-            Err("catick 已在运行（若确认没有，请删除 $XDG_RUNTIME_DIR/catick.lock）".into())
+            Err("catick is already running (if not, remove $XDG_RUNTIME_DIR/catick.lock)".into())
         }
         Err(std::fs::TryLockError::Error(err)) => Err(err.into()),
     }
@@ -147,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (w, h) = render::measure(&style, render::TEMPLATE);
         let frame = render::render(&style, &timer.display(now), w, h, false)?;
         render::dump_png(frame, path)?;
-        println!("catick: 已输出 {w}x{h} 帧到 {}", path.display());
+        println!("catick: wrote a {w}x{h} frame to {}", path.display());
         return Ok(());
     }
 
@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = app::App::new(cfg)?.run();
     if let Err(err) = &result {
-        eprintln!("catick: 退出：{err}");
+        eprintln!("catick: exiting: {err}");
     }
     result
 }

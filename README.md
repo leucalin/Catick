@@ -26,12 +26,14 @@ that floats above your windows, and is fully controllable from the system tray.
     compositors' XWayland.
 - **System tray (StatusNotifierItem)** — a live progress ring, or your own
   image (PNG / JPEG / **animated GIF**) picked from a file dialog. The menu has
-  everything: modes, quick presets, pause/reset, edit mode, click-through,
-  12/24-hour clock, font picker, color presets, font size, opacity, quit.
+  everything: modes, quick presets, pause/reset (greyed out in clock mode),
+  edit mode, click-through, a settings submenu (12/24-hour clock, fonts,
+  colors, font size, opacity, tray icon, language) and an entry that opens the
+  config folder.
 - **Fonts your way** — pick from installed families or choose any font file
   (`.ttf` / `.otf`) through the system file dialog; the file's own weight wins.
-- **English / 中文** — the interface follows `$LANG` and can be switched from
-  the tray; the choice is remembered.
+- **English & Chinese** — the interface follows `$LANG` and can be switched
+  from the tray; the choice is remembered.
 - **Edit mode** — drag to move, scroll to resize the font, Ctrl+scroll for
   opacity; everything is saved as you adjust it.
 - **Config file + CLI overrides** — `~/.config/catick/config.toml` persists
@@ -106,9 +108,9 @@ click_through = true
 tray = true
 backend = "auto"            # auto | wayland | x11
 position = { x = 900, y = 200 }
-font_path = ""              # 自定义字体文件（ttf/otf），优先于 font_family
+font_path = ""              # custom font file (ttf/otf), takes precedence
 tray_icon = "ring"          # ring | image
-tray_icon_path = ""         # 图片图标（png / gif / jpg，gif 会动）
+tray_icon_path = ""         # image icon (png / gif / jpg; gif animates)
 language = "auto"           # auto | zh | en
 on_finish_cmd = "notify-send Catick \"Time's up!\""
 edit_on_start = false

@@ -38,6 +38,8 @@ pub enum Command {
     BrowseTrayIcon,
     SetTrayIconFile(String),
     SetLanguage(Lang),
+    /// 用系统文件管理器打开配置目录
+    OpenConfigDir,
     Quit,
 }
 
@@ -158,11 +160,9 @@ impl Tray for CatickTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let t = self.state.lang.t();
         let en = self.state.lang.resolved() == Lang::En;
-        let pause_label = if self.state.running {
-            t.pause
-        } else {
-            t.resume
-        };
+        let pause_label = if self.state.running { t.pause } else { t.resume };
+        // 时钟模式下没有暂停/重置的概念
+        let timer_actions = self.state.mode != Mode::Clock;
         let mode_index = match self.state.mode {
             Mode::Clock => 0,
             Mode::Countdown => 1,
@@ -173,33 +173,43 @@ impl Tray for CatickTray {
         let lang_index = usize::from(en);
 
         vec![
-            item(pause_label, |tray| tray.send(Command::TogglePause)),
-            item(t.reset, |tray| tray.send(Command::Reset)),
+            StandardItem {
+                label: pause_label.into(),
+                enabled: timer_actions,
+                activate: Box::new(|tray: &mut Self| tray.send(Command::TogglePause)),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: t.reset.into(),
+                enabled: timer_actions,
+                activate: Box::new(|tray: &mut Self| tray.send(Command::Reset)),
+                ..Default::default()
+            }
+            .into(),
             MenuItem::Separator,
             SubMenu {
                 label: t.mode.into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: mode_index,
-                        select: Box::new(|tray: &mut Self, index: usize| {
-                            let mode = match index {
-                                0 => Mode::Clock,
-                                1 => Mode::Countdown,
-                                2 => Mode::Stopwatch,
-                                _ => Mode::Pomodoro,
-                            };
-                            tray.send(Command::SetMode(mode));
-                        }),
-                        options: [t.clock, t.countdown, t.stopwatch, t.pomodoro]
-                            .iter()
-                            .map(|label| RadioItem {
-                                label: (*label).into(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                    }
-                    .into(),
-                ],
+                submenu: vec![RadioGroup {
+                    selected: mode_index,
+                    select: Box::new(|tray: &mut Self, index: usize| {
+                        let mode = match index {
+                            0 => Mode::Clock,
+                            1 => Mode::Countdown,
+                            2 => Mode::Stopwatch,
+                            _ => Mode::Pomodoro,
+                        };
+                        tray.send(Command::SetMode(mode));
+                    }),
+                    options: [t.clock, t.countdown, t.stopwatch, t.pomodoro]
+                        .iter()
+                        .map(|label| RadioItem {
+                            label: (*label).into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                }
+                .into()],
                 ..Default::default()
             }
             .into(),
@@ -231,149 +241,155 @@ impl Tray for CatickTray {
                 ..Default::default()
             }
             .into(),
-            CheckmarkItem {
-                label: t.clock_24h.into(),
-                checked: self.state.clock_24h,
-                activate: Box::new(|tray: &mut Self| tray.send(Command::ToggleClockFormat)),
-                ..Default::default()
-            }
-            .into(),
             MenuItem::Separator,
+            // 外观与行为相关的选项统一收进「设置」
             SubMenu {
-                label: t.font.into(),
+                label: t.settings.into(),
                 submenu: vec![
-                    RadioGroup {
-                        selected: self
-                            .state
-                            .fonts
-                            .iter()
-                            .position(|f| f == &self.state.current_font)
-                            .unwrap_or(usize::MAX),
-                        select: Box::new(|tray: &mut Self, index: usize| {
-                            if let Some(font) = tray.state.fonts.get(index) {
-                                tray.send(Command::SetFont(font.clone()));
-                            }
-                        }),
-                        options: self
-                            .state
-                            .fonts
-                            .iter()
-                            .map(|font| RadioItem {
-                                label: font.clone(),
-                                ..Default::default()
-                            })
-                            .collect(),
+                    CheckmarkItem {
+                        label: t.clock_24h.into(),
+                        checked: self.state.clock_24h,
+                        activate: Box::new(|tray: &mut Self| tray.send(Command::ToggleClockFormat)),
+                        ..Default::default()
                     }
                     .into(),
                     MenuItem::Separator,
-                    item(t.font_more, |tray| tray.send(Command::BrowseFont)),
-                ],
-                ..Default::default()
-            }
-            .into(),
-            SubMenu {
-                label: t.color.into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: COLOR_PRESETS
-                            .iter()
-                            .position(|(_, _, hex)| *hex == self.state.current_color)
-                            .unwrap_or(usize::MAX),
-                        select: Box::new(|tray: &mut Self, index: usize| {
-                            if let Some((_, _, hex)) = COLOR_PRESETS.get(index) {
-                                tray.send(Command::SetColor((*hex).to_string()));
+                    SubMenu {
+                        label: t.font.into(),
+                        submenu: vec![
+                            RadioGroup {
+                                selected: self
+                                    .state
+                                    .fonts
+                                    .iter()
+                                    .position(|f| f == &self.state.current_font)
+                                    .unwrap_or(usize::MAX),
+                                select: Box::new(|tray: &mut Self, index: usize| {
+                                    if let Some(font) = tray.state.fonts.get(index) {
+                                        tray.send(Command::SetFont(font.clone()));
+                                    }
+                                }),
+                                options: self
+                                    .state
+                                    .fonts
+                                    .iter()
+                                    .map(|font| RadioItem {
+                                        label: font.clone(),
+                                        ..Default::default()
+                                    })
+                                    .collect(),
                             }
-                        }),
-                        options: COLOR_PRESETS
-                            .iter()
-                            .map(|(zh, en_name, _)| RadioItem {
-                                label: if en { (*en_name).into() } else { (*zh).into() },
-                                ..Default::default()
-                            })
-                            .collect(),
+                            .into(),
+                            MenuItem::Separator,
+                            item(t.font_more, |tray| tray.send(Command::BrowseFont)),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                    SubMenu {
+                        label: t.color.into(),
+                        submenu: vec![RadioGroup {
+                            selected: COLOR_PRESETS
+                                .iter()
+                                .position(|(_, _, hex)| *hex == self.state.current_color)
+                                .unwrap_or(usize::MAX),
+                            select: Box::new(|tray: &mut Self, index: usize| {
+                                if let Some((_, _, hex)) = COLOR_PRESETS.get(index) {
+                                    tray.send(Command::SetColor((*hex).to_string()));
+                                }
+                            }),
+                            options: COLOR_PRESETS
+                                .iter()
+                                .map(|(zh, en_name, _)| RadioItem {
+                                    label: if en { (*en_name).into() } else { (*zh).into() },
+                                    ..Default::default()
+                                })
+                                .collect(),
+                        }
+                        .into()],
+                        ..Default::default()
+                    }
+                    .into(),
+                    SubMenu {
+                        label: t.font_size.into(),
+                        submenu: vec![
+                            item(t.increase, |tray| tray.send(Command::FontSizeDelta(2.0))),
+                            item(t.decrease, |tray| tray.send(Command::FontSizeDelta(-2.0))),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                    SubMenu {
+                        label: t.opacity.into(),
+                        submenu: vec![
+                            item(t.raise, |tray| tray.send(Command::OpacityDelta(0.05))),
+                            item(t.lower, |tray| tray.send(Command::OpacityDelta(-0.05))),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                    SubMenu {
+                        label: t.tray_icon.into(),
+                        submenu: vec![
+                            RadioGroup {
+                                selected: icon_index,
+                                select: Box::new(|tray: &mut Self, index: usize| {
+                                    tray.send(Command::SetTrayIcon(if index == 1 {
+                                        TrayIconKind::Image
+                                    } else {
+                                        TrayIconKind::Ring
+                                    }));
+                                }),
+                                options: [t.icon_ring, t.icon_image]
+                                    .iter()
+                                    .map(|label| RadioItem {
+                                        label: (*label).into(),
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                            }
+                            .into(),
+                            MenuItem::Separator,
+                            item(t.icon_image, |tray| tray.send(Command::BrowseTrayIcon)),
+                        ],
+                        ..Default::default()
+                    }
+                    .into(),
+                    SubMenu {
+                        label: t.language.into(),
+                        submenu: vec![RadioGroup {
+                            selected: lang_index,
+                            select: Box::new(|tray: &mut Self, index: usize| {
+                                tray.send(Command::SetLanguage(if index == 1 {
+                                    Lang::En
+                                } else {
+                                    Lang::Zh
+                                }));
+                            }),
+                            options: [Lang::Zh, Lang::En]
+                                .iter()
+                                .map(|lang| RadioItem {
+                                    label: lang.label().into(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                        }
+                        .into()],
+                        ..Default::default()
                     }
                     .into(),
                 ],
                 ..Default::default()
             }
             .into(),
-            SubMenu {
-                label: t.font_size.into(),
-                submenu: vec![
-                    item(t.increase, |tray| tray.send(Command::FontSizeDelta(2.0))),
-                    item(t.decrease, |tray| tray.send(Command::FontSizeDelta(-2.0))),
-                ],
-                ..Default::default()
-            }
-            .into(),
-            SubMenu {
-                label: t.opacity.into(),
-                submenu: vec![
-                    item(t.raise, |tray| tray.send(Command::OpacityDelta(0.05))),
-                    item(t.lower, |tray| tray.send(Command::OpacityDelta(-0.05))),
-                ],
-                ..Default::default()
-            }
-            .into(),
-            SubMenu {
-                label: t.tray_icon.into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: icon_index,
-                        select: Box::new(|tray: &mut Self, index: usize| {
-                            tray.send(Command::SetTrayIcon(if index == 1 {
-                                TrayIconKind::Image
-                            } else {
-                                TrayIconKind::Ring
-                            }));
-                        }),
-                        options: [t.icon_ring, t.icon_image]
-                            .iter()
-                            .map(|label| RadioItem {
-                                label: (*label).into(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                    }
-                    .into(),
-                    MenuItem::Separator,
-                    item(t.icon_image, |tray| tray.send(Command::BrowseTrayIcon)),
-                ],
-                ..Default::default()
-            }
-            .into(),
-            SubMenu {
-                label: t.language.into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: lang_index,
-                        select: Box::new(|tray: &mut Self, index: usize| {
-                            tray.send(Command::SetLanguage(if index == 1 {
-                                Lang::En
-                            } else {
-                                Lang::Zh
-                            }));
-                        }),
-                        options: [Lang::Zh, Lang::En]
-                            .iter()
-                            .map(|lang| RadioItem {
-                                label: lang.label().into(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                    }
-                    .into(),
-                ],
-                ..Default::default()
-            }
-            .into(),
+            item(t.open_config_dir, |tray| tray.send(Command::OpenConfigDir)),
             MenuItem::Separator,
             item(t.quit, |tray| tray.send(Command::Quit)),
         ]
     }
 
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
-        eprintln!("catick: StatusNotifier 宿主不可用（{reason:?}），托盘图标暂时隐藏");
+        eprintln!("catick: StatusNotifier host unavailable ({reason:?}); tray icon hidden for now");
         true
     }
 }
@@ -410,15 +426,13 @@ pub fn build_state(
 ) -> TrayState {
     let moment = now();
     let display = timer.display(moment);
-    // 暂停时整体变淡，状态一眼可见
-    let dimmed = !timer.is_running() && timer.mode() != Mode::Clock;
 
     let (icon_small, icon_big, icon_is_image) = match (cfg.tray_icon, icon) {
         (TrayIconKind::Image, Some(anim)) => {
             let frame = anim.frame_at(icon_started);
             (
-                anim.render(frame, 22, dimmed).unwrap_or_default(),
-                anim.render(frame, 44, dimmed).unwrap_or_default(),
+                anim.render(frame, 22).unwrap_or_default(),
+                anim.render(frame, 44).unwrap_or_default(),
                 true,
             )
         }
@@ -427,8 +441,8 @@ pub fn build_state(
                 fraction: timer.progress(moment),
             };
             (
-                crate::render::render_icon(glyph, 22, style.color, dimmed).unwrap_or_default(),
-                crate::render::render_icon(glyph, 44, style.color, dimmed).unwrap_or_default(),
+                crate::render::render_icon(glyph, 22, style.color).unwrap_or_default(),
+                crate::render::render_icon(glyph, 44, style.color).unwrap_or_default(),
                 false,
             )
         }

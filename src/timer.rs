@@ -34,9 +34,9 @@ impl PomodoroPhase {
     #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
-            PomodoroPhase::Work => "工作",
-            PomodoroPhase::ShortBreak => "短休",
-            PomodoroPhase::LongBreak => "长休",
+            PomodoroPhase::Work => "work",
+            PomodoroPhase::ShortBreak => "short break",
+            PomodoroPhase::LongBreak => "long break",
         }
     }
 }

@@ -43,7 +43,7 @@ impl X11Overlay {
         let (visual, depth) = match find_argb_visual(&conn, screen_num) {
             Some(v) => v,
             None => {
-                eprintln!("catick: 未找到 32 位 ARGB visual，窗口将不透明");
+                eprintln!("catick: no 32-bit ARGB visual found; the window will be opaque");
                 (screen.root_visual, screen.root_depth)
             }
         };
@@ -99,7 +99,7 @@ impl X11Overlay {
             .extension_information(shape::X11_EXTENSION_NAME)?
             .is_some();
         if !has_shape {
-            eprintln!("catick: 服务器不支持 SHAPE 扩展，鼠标穿透不可用");
+            eprintln!("catick: server lacks the SHAPE extension; click-through disabled");
         }
 
         conn.map_window(win)?;
@@ -152,7 +152,7 @@ impl Overlay for X11Overlay {
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(err) => {
-                    eprintln!("catick: X11 事件读取失败: {err}");
+                    eprintln!("catick: failed to read X11 events: {err}");
                     break;
                 }
             }
@@ -185,7 +185,7 @@ impl Overlay for X11Overlay {
     fn present(&mut self, buf: &[u8], w: u32, h: u32) -> OverlayResult<()> {
         let stride = w as usize * 4;
         if buf.len() < stride * h as usize {
-            return Err(format!("帧缓冲尺寸不足: {} < {}x{}x4", buf.len(), w, h).into());
+            return Err(format!("frame buffer too small: {} < {}x{}x4", buf.len(), w, h).into());
         }
         // 分带发送，单请求不超过 MAX_REQUEST_BYTES
         let band_rows = (MAX_REQUEST_BYTES / stride.max(1)).max(1) as u32;

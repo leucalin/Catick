@@ -164,7 +164,7 @@ impl Config {
                 let backup = path.with_extension("toml.bak");
                 let _ = std::fs::rename(&path, &backup);
                 eprintln!(
-                    "catick: {} 解析失败（{err}），已备份为 {}",
+                    "catick: failed to parse {} ({err}); backed up to {}",
                     path.display(),
                     backup.display()
                 );
@@ -179,16 +179,16 @@ impl Config {
         if let Some(dir) = path.parent()
             && let Err(err) = std::fs::create_dir_all(dir)
         {
-            eprintln!("catick: 无法创建配置目录 {}: {err}", dir.display());
+            eprintln!("catick: cannot create config directory {}: {err}", dir.display());
             return;
         }
         match toml::to_string_pretty(self) {
             Ok(text) => {
                 if let Err(err) = std::fs::write(&path, text) {
-                    eprintln!("catick: 无法写入 {}: {err}", path.display());
+                    eprintln!("catick: cannot write {}: {err}", path.display());
                 }
             }
-            Err(err) => eprintln!("catick: 配置序列化失败: {err}"),
+            Err(err) => eprintln!("catick: failed to serialize config: {err}"),
         }
     }
 

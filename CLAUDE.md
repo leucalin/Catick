@@ -74,8 +74,10 @@ rendered with cairo, controlled by mouse and a StatusNotifierItem tray.
   dialog (always invoked from a worker thread; the result comes back as a
   `tray::Command`).
 - `src/tray.rs` — ksni tray on its own thread; the icon is a cairo-drawn
-  vector glyph (`render::TrayGlyph`), and the menu carries font (from
-  `fc-list`) and color-preset pickers. **Callbacks may only send to the
+  progress ring (a single arc — no track, no text) or a user image, and the
+  menu groups appearance options (fonts from `fc-list`, colors, size, opacity,
+  tray icon, language) under a Settings submenu. Pause/reset are emitted with
+  `enabled: false` in clock mode. **Callbacks may only send to the
   mpsc channel and poke the wake pipe** — never call `Handle::update` from a
   callback (deadlock); the main loop pushes state back via `update`.
 - `src/config.rs` — TOML at `$XDG_CONFIG_HOME/catick/config.toml`.
