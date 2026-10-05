@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use wayland_client::backend::ReadEventsGuard;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
-    wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_display, wl_output, wl_pointer, wl_region,
+    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::fractional_scale::v1::client::{
@@ -58,8 +58,63 @@ struct State {
     output_phys: Option<(i32, i32)>,
     /// 指针的 surface 局部坐标
     pointer_pos: (f64, f64),
-    /// 窗口当前的逻辑位置（set_geometry 维护）
-    win_pos: (i32, i32),
+    /// 位置记账（见 `PosTracker`）
+    pos: PosTracker,
+    sync_callback: Option<wl_callback::WlCallback>,
+}
+
+/// 拖动位置记账。
+///
+/// Wayland 的指针事件坐标是相对「合成器当前已应用」的窗口位置算出来的，
+/// 而 set_margin 的提交是异步的。如果按本地已提交的位置补偿，事件积压时
+/// 位移会被重复累加（表现为拖动飞出屏幕）。这里用 `wl_display.sync` 回调
+/// 确认合成器真正处理到的位置，并用它换算虚拟根坐标。
+#[derive(Debug, Default, Clone, Copy)]
+struct PosTracker {
+    /// 已提交给合成器的位置
+    tracked: (i32, i32),
+    /// 已确认被合成器处理的位置
+    confirmed: (i32, i32),
+    sync_in_flight: bool,
+    sync_target: (i32, i32),
+    needs_sync: bool,
+}
+
+impl PosTracker {
+    /// 记录一次位置提交；返回需要发起 sync 时的新目标。
+    fn submit(&mut self, pos: (i32, i32)) -> Option<(i32, i32)> {
+        self.tracked = pos;
+        if self.sync_in_flight {
+            self.needs_sync = true;
+            None
+        } else {
+            self.sync_in_flight = true;
+            self.sync_target = pos;
+            Some(pos)
+        }
+    }
+
+    /// sync 回调返回；返回需要继续发起的下一个 sync 目标。
+    fn sync_done(&mut self) -> Option<(i32, i32)> {
+        self.sync_in_flight = false;
+        self.confirmed = self.sync_target;
+        if self.needs_sync {
+            self.needs_sync = false;
+            self.sync_in_flight = true;
+            self.sync_target = self.tracked;
+            Some(self.sync_target)
+        } else {
+            None
+        }
+    }
+
+    /// surface 局部坐标 → 虚拟根坐标（应用层拖动算法与 X11 共用）。
+    fn root(&self, local: (f64, f64)) -> (i32, i32) {
+        (
+            local.0.round() as i32 + self.confirmed.0,
+            local.1.round() as i32 + self.confirmed.1,
+        )
+    }
 }
 
 pub struct WaylandOverlay {
@@ -183,6 +238,14 @@ impl WaylandOverlay {
         }
         Ok(())
     }
+
+    /// 发起一次位置确认：compositor 处理完此前所有请求后会触发 done 回调。
+    fn request_sync(&mut self, target: (i32, i32)) {
+        let callback = self.conn.display().sync(&self.queue.handle(), ());
+        self.state.sync_callback = Some(callback);
+        self.state.pos.sync_target = target;
+        self.state.pos.sync_in_flight = true;
+    }
 }
 
 impl Overlay for WaylandOverlay {
@@ -214,23 +277,31 @@ impl Overlay for WaylandOverlay {
     }
 
     fn set_geometry(&mut self, x: i32, y: i32, w: u32, h: u32) -> OverlayResult<()> {
-        let Some(layer_surface) = &self.state.layer_surface else {
+        let Some(layer_surface) = self.state.layer_surface.clone() else {
             return Ok(());
         };
-        // 锚定左上角时：margin(top, right, bottom, left)
-        layer_surface.set_margin(y, 0, 0, x);
-        layer_surface.set_size(w, h);
-        if let Some(viewport) = &self.state.viewport {
-            viewport.set_destination(w as i32, h as i32);
+        let size_changed = (w, h) != (self.w, self.h);
+        let pos_changed = (x, y) != self.state.pos.tracked;
+        if size_changed {
+            layer_surface.set_size(w, h);
+            if let Some(viewport) = &self.state.viewport {
+                viewport.set_destination(w as i32, h as i32);
+            }
+        }
+        if pos_changed {
+            // 锚定左上角时：margin(top, right, bottom, left)
+            layer_surface.set_margin(y, 0, 0, x);
         }
         if let Some(surface) = &self.state.surface {
             surface.commit();
         }
-        self.state.win_pos = (x, y);
         self.x = x;
         self.y = y;
         self.w = w;
         self.h = h;
+        if let Some(target) = self.state.pos.submit((x, y)) {
+            self.request_sync(target);
+        }
         self.conn.flush()?;
         Ok(())
     }
@@ -381,10 +452,13 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for State {
                 height,
             } => {
                 layer_surface.ack_configure(serial);
-                state.configured = true;
-                // 尺寸以 set_geometry 为准；configure 只在此提示需要在下一帧生效
                 let _ = (width, height);
-                state.pending.push(Input::Redraw);
+                // 尺寸由 set_geometry 决定；只有首个 configure 需要重绘。
+                // 拖动时的 margin 提交也可能触发 configure，不能每次都重绘。
+                if !state.configured {
+                    state.configured = true;
+                    state.pending.push(Input::Redraw);
+                }
             }
             zwlr_layer_surface_v1::Event::Closed => state.pending.push(Input::Close),
             _ => {}
@@ -467,12 +541,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
     ) {
         // Wayland 不提供全局坐标：用「局部坐标 + 窗口位置」虚拟出根坐标，
         // 这样应用层的拖动算法与 X11 后端完全一致。
-        let root = |state: &State| {
-            (
-                (state.pointer_pos.0 as i32) + state.win_pos.0,
-                (state.pointer_pos.1 as i32) + state.win_pos.1,
-            )
-        };
+        let root = |state: &State| state.pos.root(state.pointer_pos);
         match event {
             wl_pointer::Event::Enter {
                 surface_x,
@@ -532,5 +601,75 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            // 合成器已处理到此处；销毁回调对象（标准做法）
+            state.sync_callback = None;
+            if let Some(target) = state.pos.sync_done() {
+                let callback = conn.display().sync(qh, ());
+                state.sync_callback = Some(callback);
+                state.pos.sync_target = target;
+                state.pos.sync_in_flight = true;
+            }
+        }
+    }
+}
+
+ignore_events!(wl_display::WlDisplay);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 模拟「按下 → 拖动 → 合成器确认」的坐标换算，保证本地位移不会被重复累加
+    /// （此前的实现会让拖动瞬间飞出屏幕）。
+    #[test]
+    fn drag_does_not_double_count_moves() {
+        // 按下：局部 (100,100)，窗口在 (0,0)
+        let mut pos = PosTracker::default();
+        let press_root = pos.root((100.0, 100.0));
+        let win_at_press = (0, 0);
+
+        // 指针 +10，合成器尚未处理提交：局部坐标直接反映真实位移
+        let root = pos.root((110.0, 100.0));
+        assert_eq!(win_at_press.0 + (root.0 - press_root.0), 10);
+
+        // 提交 + 合成器确认
+        assert_eq!(pos.submit((10, 0)), Some((10, 0)));
+        assert_eq!(pos.sync_done(), None);
+
+        // 指针再 +5：局部坐标相对新窗口位置「回卷」，结果仍是真实位移
+        let root = pos.root((105.0, 100.0));
+        assert_eq!(win_at_press.0 + (root.0 - press_root.0), 15);
+
+        // 事件积压：确认位置不变时，只有指针真实位移被计入（而非累加）
+        let pos = PosTracker::default();
+        let press = pos.root((100.0, 100.0));
+        let mut x = 0;
+        for local in [110.0, 120.0, 130.0] {
+            let root = pos.root((local, 100.0));
+            x = win_at_press.0 + (root.0 - press.0);
+        }
+        assert_eq!(x, 30);
+
+        // 提交期间有未确认的位置时，sync 完成后补发确认
+        let mut pos = PosTracker::default();
+        assert!(pos.submit((10, 0)).is_some());
+        assert!(pos.submit((20, 0)).is_none());
+        assert_eq!(pos.sync_done(), Some((20, 0)));
+        assert_eq!(pos.confirmed, (10, 0));
+        assert_eq!(pos.sync_done(), None);
+        assert_eq!(pos.confirmed, (20, 0));
     }
 }

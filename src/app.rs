@@ -365,8 +365,11 @@ impl App {
                     let dy = root_y - drag.press_root.1;
                     let moved =
                         drag.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD;
-                    let (nx, ny) = (drag.win_pos.0 + dx, drag.win_pos.1 + dy);
                     let (_, _, w, h) = self.ov.geometry();
+                    // 夹取位置：至少留 32px 在屏幕内，避免窗口被拖丢
+                    let (screen_w, screen_h) = self.ov.screen_size();
+                    let nx = (drag.win_pos.0 + dx).clamp(-(w as i32) + 32, screen_w as i32 - 32);
+                    let ny = (drag.win_pos.1 + dy).clamp(0, screen_h as i32 - 32);
                     self.ov.set_geometry(nx, ny, w, h)?;
                     if let Some(drag) = self.drag.as_mut() {
                         drag.moved = moved;
