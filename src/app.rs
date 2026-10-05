@@ -44,6 +44,11 @@ pub struct App {
     dirty: bool,
     edit_mode: bool,
     drag: Option<Drag>,
+    /// 窗口的物理像素尺寸（渲染缓冲大小；逻辑尺寸 = 物理 / scale）
+    phys_w: u32,
+    phys_h: u32,
+    /// 收到 Close（Wayland 下合成器关闭了 layer surface）后退出
+    quit: bool,
     /// on_finish_cmd 的子进程，定期回收防僵尸
     children: Vec<Child>,
     /// 系统托盘（可能因缺少 SNI 宿主而未启动）
@@ -56,6 +61,22 @@ struct Drag {
     press_root: (i32, i32),
     win_pos: (i32, i32),
     moved: bool,
+}
+
+/// 按缩放因子测量渲染尺寸（物理像素）。
+fn measure_phys(style: &Style, scale: f64) -> (u32, u32) {
+    let mut scaled = style.clone();
+    scaled.size = (style.size * scale).max(1.0);
+    render::measure(&scaled, render::TEMPLATE)
+}
+
+/// 物理像素 → 逻辑尺寸。
+fn logical_size(phys_w: u32, phys_h: u32, scale: f64) -> (u32, u32) {
+    let scale = scale.max(0.05);
+    (
+        ((phys_w as f64 / scale).ceil() as u32).max(1),
+        ((phys_h as f64 / scale).ceil() as u32).max(1),
+    )
 }
 
 /// 秒数转配置文件里的人类可读写法（3600 → "1h"）。
@@ -75,7 +96,10 @@ impl App {
         let style = Style::from_config(&cfg);
         let edit_mode = cfg.edit_on_start;
 
-        let (w, h) = render::measure(&style, render::TEMPLATE);
+        // 物理像素渲染 + 逻辑坐标布局（Wayland 分数缩放；X11 下两者相同）
+        let scale = ov.scale();
+        let (phys_w, phys_h) = measure_phys(&style, scale);
+        let (w, h) = logical_size(phys_w, phys_h, scale);
         let (screen_w, screen_h) = ov.screen_size();
         let (x, y) = cfg
             .position
@@ -103,6 +127,15 @@ impl App {
             None
         };
 
+        println!(
+            "catick: 后端={} 缩放={:.2} 尺寸={}x{}px @ ({x},{y}) 模式={:?}",
+            ov.name(),
+            ov.scale(),
+            phys_w,
+            phys_h,
+            cfg.mode,
+        );
+
         Ok(App {
             cfg,
             ov,
@@ -115,6 +148,9 @@ impl App {
             dirty: true,
             edit_mode,
             drag: None,
+            phys_w,
+            phys_h,
+            quit: false,
             children: Vec::new(),
             tray,
             tray_key: String::new(),
@@ -133,9 +169,35 @@ impl App {
         // SAFETY: fd 由 ov 持有，在 ov 存活期间始终有效
         loop {
             let now = timer::now();
+            self.sync_surface_size()?;
 
-            for ev in self.ov.drain_events() {
+            let backend_raw = self.ov.poll_fd();
+            // SAFETY: fd 由后端持有，在本轮迭代内保持有效
+            let backend_fd = unsafe { BorrowedFd::borrow_raw(backend_raw) };
+            let mut fds = vec![PollFd::new(&backend_fd, PollFlags::IN)];
+            if let Some(tray) = &self.tray {
+                fds.push(PollFd::new(&tray.wake_read, PollFlags::IN));
+            }
+            let timeout = self
+                .timer
+                .next_update(now)
+                .map_or(MAX_TIMEOUT, |d| d.clamp(MIN_TIMEOUT, MAX_TIMEOUT));
+            let ts = Timespec::try_from(timeout)?;
+            match poll(&mut fds, Some(&ts)) {
+                Ok(_) => {}
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(err) => return Err(err.into()),
+            }
+            let backend_readable = fds[0].revents().intersects(
+                PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
+            );
+
+            for ev in self.ov.drain_events(backend_readable) {
                 self.handle_input(ev, now)?;
+            }
+            if self.quit {
+                self.shutdown_tray();
+                return Ok(());
             }
             if let Some(event) = self.timer.tick(now) {
                 self.handle_timer_event(event);
@@ -145,27 +207,15 @@ impl App {
             self.ov.flush()?;
             self.reap_children();
 
-            let timeout = self
-                .timer
-                .next_update(now)
-                .map_or(MAX_TIMEOUT, |d| d.clamp(MIN_TIMEOUT, MAX_TIMEOUT));
-            let ts = Timespec::try_from(timeout)?;
-            {
-                let backend_fd = unsafe { BorrowedFd::borrow_raw(self.ov.event_fd()) };
-                let mut fds = vec![PollFd::new(&backend_fd, PollFlags::IN)];
-                if let Some(tray) = &self.tray {
-                    fds.push(PollFd::new(&tray.wake_read, PollFlags::IN));
-                }
-                match poll(&mut fds, Some(&ts)) {
-                    Ok(_) => {}
-                    Err(rustix::io::Errno::INTR) => continue,
-                    Err(err) => return Err(err.into()),
-                }
-            }
-
             if self.handle_tray_commands(now)? {
                 return Ok(());
             }
+        }
+    }
+
+    fn shutdown_tray(&self) {
+        if let Some(tray) = &self.tray {
+            tray.handle.shutdown().wait();
         }
     }
 
@@ -224,7 +274,7 @@ impl App {
             Command::FontSizeDelta(delta) => {
                 self.style.size = (self.style.size + delta).clamp(FONT_MIN, FONT_MAX);
                 self.cfg.font_size = self.style.size;
-                self.resize_keep_center()?;
+                self.dirty = true;
                 persist = true;
             }
             Command::OpacityDelta(delta) => {
@@ -235,9 +285,7 @@ impl App {
                 persist = true;
             }
             Command::Quit => {
-                if let Some(tray) = &self.tray {
-                    tray.handle.shutdown().wait();
-                }
+                self.shutdown_tray();
                 return Ok(true);
             }
         }
@@ -326,7 +374,32 @@ impl App {
                 }
             }
             Input::Redraw => self.dirty = true,
+            Input::Close => self.quit = true,
         }
+        Ok(())
+    }
+
+    /// 渲染尺寸与当前测量结果不一致时重设窗口（字号/缩放变化后保持中心）。
+    fn sync_surface_size(&mut self) -> Result<(), Box<dyn Error>> {
+        let (pw, ph) = measure_phys(&self.style, self.ov.scale());
+        if (pw, ph) == (self.phys_w, self.phys_h) {
+            return Ok(());
+        }
+        let scale = self.ov.scale();
+        let (x, y, lw, lh) = self.ov.geometry();
+        let (cx, cy) = (x as f64 + lw as f64 / 2.0, y as f64 + lh as f64 / 2.0);
+        let (nlw, nlh) = logical_size(pw, ph, scale);
+        let nx = (cx - nlw as f64 / 2.0).round() as i32;
+        let ny = (cy - nlh as f64 / 2.0).round() as i32;
+        let (screen_w, screen_h) = self.ov.screen_size();
+        let nx = nx.clamp(-(nlw as i32) + 32, screen_w as i32 - 32);
+        let ny = ny.clamp(0, screen_h as i32 - 32);
+        self.ov.set_geometry(nx, ny, nlw, nlh)?;
+        self.phys_w = pw;
+        self.phys_h = ph;
+        self.cfg.position = Some(Position { x: nx, y: ny });
+        self.persist();
+        self.dirty = true;
         Ok(())
     }
 
@@ -348,7 +421,7 @@ impl App {
                 self.style.size =
                     (self.style.size + FONT_STEP * dir as f64).clamp(FONT_MIN, FONT_MAX);
                 self.cfg.font_size = self.style.size;
-                self.resize_keep_center()?;
+                self.dirty = true;
             }
         } else {
             // 默认 ±1 分钟；Shift ±10s；Ctrl ±1h
@@ -363,22 +436,6 @@ impl App {
                 self.dirty = true;
             }
         }
-        Ok(())
-    }
-
-    /// 字号变化后按旧中心重新摆放并缩放窗口。
-    fn resize_keep_center(&mut self) -> Result<(), Box<dyn Error>> {
-        let (x, y, w, h) = self.ov.geometry();
-        let (cx, cy) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
-        let (nw, nh) = render::measure(&self.style, render::TEMPLATE);
-        let nx = (cx - nw as f64 / 2.0).round() as i32;
-        let ny = (cy - nh as f64 / 2.0).round() as i32;
-        let (screen_w, screen_h) = self.ov.screen_size();
-        let nx = nx.clamp(-(nw as i32) + 32, screen_w as i32 - 32);
-        let ny = ny.clamp(0, screen_h as i32 - 32);
-        self.ov.set_geometry(nx, ny, nw, nh)?;
-        self.cfg.position = Some(Position { x: nx, y: ny });
-        self.dirty = true;
         Ok(())
     }
 
@@ -444,12 +501,12 @@ impl App {
         }
 
         let mut style = self.style.clone();
+        style.size = (style.size * self.ov.scale()).max(1.0);
         if !blink_on {
             style.opacity = 0.0;
         }
-        let (_, _, w, h) = self.ov.geometry();
-        let frame = render::render(&style, &text, w, h, self.edit_mode)?;
-        self.ov.present(&frame.pixels)?;
+        let frame = render::render(&style, &text, self.phys_w, self.phys_h, self.edit_mode)?;
+        self.ov.present(&frame.pixels, frame.width, frame.height)?;
 
         self.frame = Some(frame);
         self.frame_text = text;

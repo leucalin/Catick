@@ -1,11 +1,528 @@
 //! Wayland 后端：wlr-layer-shell 的 overlay 层窗口（水印式悬浮）。
 //!
-//! 这是占位实现；真正的 layer-shell 支持会在后续步骤补齐，
-//! 此前 `auto` 模式会回退到 X11 后端。
+//! 与 X11 后端的差异：
+//! - 事件读取走 `prepare_read` + poll + `dispatch_pending` 三步；
+//! - 位置用锚点（top|left）+ 边距（margin）表达；
+//! - 支持 wp_viewporter + fractional-scale：按物理像素渲染，分数缩放屏幕下文字清晰。
 
-use crate::overlay::{Overlay, OverlayResult};
+use crate::overlay::{Input, Modifiers, Overlay, OverlayResult};
+use rustix::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::time::{Duration, Instant};
+use wayland_client::backend::ReadEventsGuard;
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
+    wl_shm_pool, wl_surface,
+};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
+};
+use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use zwlr_layer_shell_v1::Layer;
+use zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity};
 
-/// 创建 Wayland 悬浮层；未实现前返回错误，由调用方决定是否回退。
+/// Linux input-event-codes 的鼠标键值。
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
+
 pub fn create() -> OverlayResult<Box<dyn Overlay>> {
-    Err("Wayland 后端尚未实现".into())
+    Ok(Box::new(WaylandOverlay::new()?))
+}
+
+/// 全部 Wayland 代理与事件翻译状态。
+#[derive(Default)]
+struct State {
+    compositor: Option<wl_compositor::WlCompositor>,
+    shm: Option<wl_shm::WlShm>,
+    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+    viewporter: Option<wp_viewporter::WpViewporter>,
+    fractional_mgr: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+    output: Option<wl_output::WlOutput>,
+    seat: Option<wl_seat::WlSeat>,
+    pointer: Option<wl_pointer::WlPointer>,
+    surface: Option<wl_surface::WlSurface>,
+    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
+    viewport: Option<wp_viewport::WpViewport>,
+    fractional: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
+
+    /// 已翻译、待应用层取走的事件
+    pending: Vec<Input>,
+    /// 已 attach、等待 compositor release 的缓冲
+    pending_buffers: Vec<wl_buffer::WlBuffer>,
+    configured: bool,
+    scale: f64,
+    /// 输出的物理像素尺寸（来自 mode 事件），用于默认位置
+    output_phys: Option<(i32, i32)>,
+    /// 指针的 surface 局部坐标
+    pointer_pos: (f64, f64),
+    /// 窗口当前的逻辑位置（set_geometry 维护）
+    win_pos: (i32, i32),
+}
+
+pub struct WaylandOverlay {
+    conn: Connection,
+    queue: EventQueue<State>,
+    state: State,
+    guard: Option<ReadEventsGuard>,
+    fd: OwnedFd,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+impl WaylandOverlay {
+    pub fn new() -> OverlayResult<Self> {
+        let conn = Connection::connect_to_env()?;
+        let fd = {
+            let guard = conn
+                .prepare_read()
+                .ok_or("Wayland: 连接暂不可读（初始化阶段不应发生）")?;
+            let fd = rustix::io::dup(guard.connection_fd())?;
+            drop(guard);
+            fd
+        };
+
+        let (globals, queue) = registry_queue_init::<State>(&conn)?;
+        let qh = queue.handle();
+
+        let mut state = State {
+            scale: 1.0,
+            ..Default::default()
+        };
+        state.compositor = Some(globals.bind(&qh, 1..=6, ())?);
+        state.shm = Some(globals.bind(&qh, 1..=1, ())?);
+        state.layer_shell = Some(globals.bind(&qh, 1..=4, ())?);
+        state.seat = globals.bind(&qh, 1..=7, ()).ok();
+        state.viewporter = globals.bind(&qh, 1..=1, ()).ok();
+        state.fractional_mgr = globals.bind(&qh, 1..=1, ()).ok();
+        let output_global = globals
+            .contents()
+            .clone_list()
+            .into_iter()
+            .find(|g| g.interface == "wl_output");
+        if let Some(global) = output_global {
+            state.output = Some(globals.registry().bind(
+                global.name,
+                global.version.min(4),
+                &qh,
+                (),
+            ));
+        }
+
+        let surface = state
+            .compositor
+            .as_ref()
+            .expect("compositor 已绑定")
+            .create_surface(&qh, ());
+        state.surface = Some(surface.clone());
+        if let Some(vp) = &state.viewporter {
+            state.viewport = Some(vp.get_viewport(&surface, &qh, ()));
+        }
+        if let Some(mgr) = &state.fractional_mgr {
+            state.fractional = Some(mgr.get_fractional_scale(&surface, &qh, ()));
+        }
+
+        let layer_surface = state
+            .layer_shell
+            .as_ref()
+            .expect("layer shell 已绑定")
+            .get_layer_surface(
+                &surface,
+                state.output.as_ref(),
+                Layer::Overlay,
+                "catick".into(),
+                &qh,
+                (),
+            );
+        layer_surface.set_anchor(Anchor::Top | Anchor::Left);
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer_surface.set_size(1, 1);
+        layer_surface.set_margin(0, 0, 0, 0);
+        state.layer_surface = Some(layer_surface);
+        surface.commit();
+        conn.flush()?;
+
+        let mut overlay = WaylandOverlay {
+            conn,
+            queue,
+            state,
+            guard: None,
+            fd,
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+        };
+        overlay.wait_configured(Duration::from_secs(5))?;
+        Ok(overlay)
+    }
+
+    /// 等待首个 configure（同时处理 seat/output 等初始化事件）。
+    fn wait_configured(&mut self, timeout: Duration) -> OverlayResult<()> {
+        let deadline = Instant::now() + timeout;
+        while !self.state.configured {
+            if Instant::now() > deadline {
+                return Err("Wayland: 等待 layer surface configure 超时".into());
+            }
+            let fd = self.poll_fd();
+            // SAFETY: fd 由 self 持有，在 wait_configured 期间保持有效
+            let fd_ref = unsafe { rustix::fd::BorrowedFd::borrow_raw(fd) };
+            let mut fds = [rustix::event::PollFd::new(&fd_ref, rustix::event::PollFlags::IN)];
+            let ts = rustix::time::Timespec::try_from(Duration::from_millis(200))?;
+            let _ = rustix::event::poll(&mut fds, Some(&ts));
+            let readable = fds[0]
+                .revents()
+                .contains(rustix::event::PollFlags::IN);
+            let _ = self.drain_events(readable);
+        }
+        Ok(())
+    }
+}
+
+impl Overlay for WaylandOverlay {
+    fn poll_fd(&mut self) -> RawFd {
+        if self.guard.is_none() {
+            self.guard = self.conn.prepare_read();
+        }
+        self.fd.as_raw_fd()
+    }
+
+    fn drain_events(&mut self, readable: bool) -> Vec<Input> {
+        // guard 取出后无论是否可读都会 drop：不可读即取消这次 prepare_read
+        if let Some(guard) = self.guard.take()
+            && readable
+            && let Err(err) = guard.read()
+        {
+            eprintln!("catick: Wayland 读取事件失败: {err}");
+        }
+        if let Err(err) = self.queue.dispatch_pending(&mut self.state) {
+            eprintln!("catick: Wayland 分发事件失败: {err}");
+        }
+        let _ = self.conn.flush();
+        std::mem::take(&mut self.state.pending)
+    }
+
+    fn flush(&mut self) -> OverlayResult<()> {
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn set_geometry(&mut self, x: i32, y: i32, w: u32, h: u32) -> OverlayResult<()> {
+        let Some(layer_surface) = &self.state.layer_surface else {
+            return Ok(());
+        };
+        // 锚定左上角时：margin(top, right, bottom, left)
+        layer_surface.set_margin(y, 0, 0, x);
+        layer_surface.set_size(w, h);
+        if let Some(viewport) = &self.state.viewport {
+            viewport.set_destination(w as i32, h as i32);
+        }
+        if let Some(surface) = &self.state.surface {
+            surface.commit();
+        }
+        self.state.win_pos = (x, y);
+        self.x = x;
+        self.y = y;
+        self.w = w;
+        self.h = h;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn geometry(&self) -> (i32, i32, u32, u32) {
+        (self.x, self.y, self.w, self.h)
+    }
+
+    fn present(&mut self, buf: &[u8], w: u32, h: u32) -> OverlayResult<()> {
+        let (rw, rh) = (w as i32, h as i32);
+        if buf.len() < (rw * rh * 4) as usize {
+            return Err(format!("帧缓冲尺寸不足: {} < {rw}x{rh}x4", buf.len()).into());
+        }
+        let stride = rw * 4;
+
+        // wl_shm 缓冲：memfd + 写入像素 + pool/buffer
+        let file = rustix::fs::memfd_create("catick", rustix::fs::MemfdFlags::CLOEXEC)?;
+        rustix::fs::ftruncate(&file, buf.len() as u64)?;
+        rustix::io::write(&file, buf)?;
+
+        let shm = self.state.shm.clone().ok_or("Wayland: 缺少 wl_shm")?;
+        let qh = self.queue.handle();
+        let pool = shm.create_pool(file.as_fd(), buf.len() as i32, &qh, ());
+        let buffer = pool.create_buffer(0, rw, rh, stride, wl_shm::Format::Argb8888, &qh, ());
+        pool.destroy();
+        drop(file);
+
+        let surface = self.state.surface.clone().ok_or("Wayland: 缺少 surface")?;
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage_buffer(0, 0, rw, rh);
+        if let Some(viewport) = &self.state.viewport {
+            // 缓冲是物理像素，视口把它映射回逻辑尺寸（分数缩放的关键）
+            viewport.set_destination(self.w as i32, self.h as i32);
+        }
+        surface.commit();
+        self.state.pending_buffers.push(buffer);
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn set_passthrough(&mut self, on: bool) -> OverlayResult<()> {
+        let Some(surface) = &self.state.surface else {
+            return Ok(());
+        };
+        if on {
+            let compositor = self.state.compositor.clone().ok_or("Wayland: 缺少 compositor")?;
+            let region = compositor.create_region(&self.queue.handle(), ());
+            surface.set_input_region(Some(&region));
+            region.destroy();
+        } else {
+            surface.set_input_region(None);
+        }
+        surface.commit();
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn screen_size(&self) -> (u32, u32) {
+        let scale = self.state.scale.max(0.1);
+        match self.state.output_phys {
+            Some((w, h)) => ((w as f64 / scale) as u32, (h as f64 / scale) as u32),
+            None => ((1920.0 / scale) as u32, (1080.0 / scale) as u32),
+        }
+    }
+
+    fn scale(&self) -> f64 {
+        self.state.scale
+    }
+
+    fn name(&self) -> &'static str {
+        "wayland"
+    }
+}
+
+// ---- Dispatch：把 Wayland 事件翻译成 Overlay 的 Input ----
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+macro_rules! ignore_events {
+    ($iface:ty) => {
+        impl Dispatch<$iface, ()> for State {
+            fn event(
+                _: &mut Self,
+                _: &$iface,
+                _: <$iface as Proxy>::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+            }
+        }
+    };
+}
+
+ignore_events!(wl_compositor::WlCompositor);
+ignore_events!(wl_shm::WlShm);
+ignore_events!(wl_shm_pool::WlShmPool);
+ignore_events!(wl_surface::WlSurface);
+ignore_events!(zwlr_layer_shell_v1::ZwlrLayerShellV1);
+ignore_events!(wl_region::WlRegion);
+ignore_events!(wp_viewporter::WpViewporter);
+ignore_events!(wp_viewport::WpViewport);
+ignore_events!(wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for State {
+    fn event(
+        state: &mut Self,
+        buffer: &wl_buffer::WlBuffer,
+        event: wl_buffer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            // 释放后即可安全销毁；无 event 时缓冲区一直堆积是内存泄漏
+            state.pending_buffers.retain(|b| b.id() != buffer.id());
+        }
+    }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                layer_surface.ack_configure(serial);
+                state.configured = true;
+                // 尺寸以 set_geometry 为准；configure 只在此提示需要在下一帧生效
+                let _ = (width, height);
+                state.pending.push(Input::Redraw);
+            }
+            zwlr_layer_surface_v1::Event::Closed => state.pending.push(Input::Close),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_output::Event::Scale { factor } => {
+                if factor > 0 {
+                    state.scale = factor as f64;
+                    state.pending.push(Input::Redraw);
+                }
+            }
+            wl_output::Event::Mode { width, height, .. } => {
+                state.output_phys = Some((width, height));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            state.scale = scale as f64 / 120.0;
+            state.pending.push(Input::Redraw);
+        }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        state: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+        {
+            if caps.contains(wl_seat::Capability::Pointer) {
+                if state.pointer.is_none() {
+                    state.pointer = Some(seat.get_pointer(qh, ()));
+                }
+            } else {
+                state.pointer = None;
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // Wayland 不提供全局坐标：用「局部坐标 + 窗口位置」虚拟出根坐标，
+        // 这样应用层的拖动算法与 X11 后端完全一致。
+        let root = |state: &State| {
+            (
+                (state.pointer_pos.0 as i32) + state.win_pos.0,
+                (state.pointer_pos.1 as i32) + state.win_pos.1,
+            )
+        };
+        match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            }
+            | wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_pos = (surface_x, surface_y);
+                let (x, y) = root(state);
+                state.pending.push(Input::Motion { root_x: x, root_y: y });
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: WEnum::Value(button_state),
+                ..
+            } => {
+                let code = match button {
+                    BTN_LEFT => 1,
+                    BTN_RIGHT => 3,
+                    BTN_MIDDLE => 2,
+                    _ => return,
+                };
+                let (x, y) = root(state);
+                // Wayland 指针事件不携带修饰键：Ctrl/Shift 组合请使用托盘菜单
+                if button_state == wl_pointer::ButtonState::Pressed {
+                    state.pending.push(Input::ButtonPress {
+                        button: code,
+                        modifiers: Modifiers::default(),
+                        root_x: x,
+                        root_y: y,
+                    });
+                } else {
+                    state.pending.push(Input::ButtonRelease { button: code });
+                }
+            }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => {
+                // 正值为向下滚
+                let button = if value > 0.0 { 5 } else { 4 };
+                let (x, y) = root(state);
+                state.pending.push(Input::ButtonPress {
+                    button,
+                    modifiers: Modifiers::default(),
+                    root_x: x,
+                    root_y: y,
+                });
+            }
+            _ => {}
+        }
+    }
 }

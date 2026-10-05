@@ -123,11 +123,11 @@ impl X11Overlay {
 }
 
 impl Overlay for X11Overlay {
-    fn event_fd(&self) -> RawFd {
+    fn poll_fd(&mut self) -> RawFd {
         self.conn.stream().as_raw_fd()
     }
 
-    fn drain_events(&mut self) -> Vec<Input> {
+    fn drain_events(&mut self, _readable: bool) -> Vec<Input> {
         let mut out = Vec::new();
         loop {
             match self.conn.poll_for_event() {
@@ -182,8 +182,7 @@ impl Overlay for X11Overlay {
         (self.x, self.y, self.w, self.h)
     }
 
-    fn present(&mut self, buf: &[u8]) -> OverlayResult<()> {
-        let (w, h) = (self.w, self.h);
+    fn present(&mut self, buf: &[u8], w: u32, h: u32) -> OverlayResult<()> {
         let stride = w as usize * 4;
         if buf.len() < stride * h as usize {
             return Err(format!(
@@ -260,6 +259,10 @@ impl Overlay for X11Overlay {
 
     fn screen_size(&self) -> (u32, u32) {
         (self.screen_w, self.screen_h)
+    }
+
+    fn name(&self) -> &'static str {
+        "x11"
     }
 }
 
