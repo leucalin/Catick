@@ -295,19 +295,24 @@ impl Timer {
         if self.finished {
             return Some(Duration::from_millis(500 - (now.as_millis() % 500) as u64));
         }
+        // 刷新时刻必须用纳秒精度算：毫秒截断会把「不足 1ms 的小数部分」算成 0，
+        // 误判为「正好落在边界上」而整睡 1 秒，越过边界后下一次又只睡 ~0ms，
+        // 表现为秒数停两秒再跳一格。
+        //
+        // 两类显示的边界方向相反：
+        // - 倒计时/番茄钟显示 ceil(剩余量)，剩余量的小数部分归零时变化 → 等小数部分本身；
+        // - 时钟/秒表显示 floor(时间)，小数部分归零（进位）时变化 → 等 1s 减去小数部分。
         match self.mode {
             Mode::Clock => {
-                let ms = chrono::Local::now().timestamp_subsec_millis() as u64;
-                Some(Duration::from_millis(1000 - ms.min(999)))
+                let nanos = chrono::Local::now().timestamp_subsec_nanos();
+                Some(nanos_until_carry(nanos))
             }
             Mode::Stopwatch => self
                 .start
-                .map(|_| Duration::from_millis(1000 - self.elapsed_at(now).subsec_millis() as u64)),
-            Mode::Countdown | Mode::Pomodoro => self.end.map(|_| {
-                // 显示按秒向上取整：剩余量跨越整秒时刷新
-                let ms = self.remaining_at(now).subsec_millis() as u64;
-                Duration::from_millis(if ms == 0 { 1000 } else { ms })
-            }),
+                .map(|_| nanos_until_carry(self.elapsed_at(now).subsec_nanos())),
+            Mode::Countdown | Mode::Pomodoro => self
+                .end
+                .map(|_| nanos_until_truncate(self.remaining_at(now).subsec_nanos())),
         }
     }
 
@@ -341,6 +346,22 @@ impl Timer {
     }
 }
 
+/// 递减显示（ceil 剩余量）：小数部分归零即到边界，等小数部分本身；正好归零则等一整秒。
+fn nanos_until_truncate(nanos: u32) -> Duration {
+    if nanos == 0 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_nanos(u64::from(nanos))
+    }
+}
+
+/// 递增显示（floor 时间）：小数部分归零时要进位，等 1 秒减去小数部分。
+fn nanos_until_carry(nanos: u32) -> Duration {
+    Duration::from_nanos(u64::from(
+        1_000_000_000u32.saturating_sub(nanos.min(999_999_999)),
+    ))
+}
+
 fn format_hms(total: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",
@@ -356,4 +377,77 @@ fn ceil_secs(d: Duration) -> u64 {
 
 fn floor_secs(d: Duration) -> u64 {
     d.as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// 小数部分不足 1ms 时，绝不能把「到下一个整秒」算成整整 1 秒
+    /// （否则会停顿 2 秒再跳，表现为秒数卡一下）。
+    #[test]
+    fn countdown_next_update_handles_sub_millisecond_fractions() {
+        let cfg = Config {
+            mode: Mode::Countdown,
+            duration: "10.0009s".into(),
+            ..Config::default()
+        };
+        let t0 = Duration::from_secs(1_000);
+        let timer = Timer::new(&cfg, t0);
+        let next = timer.next_update(t0).expect("倒计时应给出下次刷新时刻");
+        // 递减显示：小数部分 0.0009s 归零时变化，只等 0.9ms（而不是 1s，也不是 999.1ms）
+        assert!(
+            next >= Duration::from_micros(800) && next <= Duration::from_micros(1_000),
+            "expected ~0.9ms, got {next:?}"
+        );
+    }
+
+    /// 时钟/秒表是递增显示，边界在进位处，等的是「1 秒减去小数部分」。
+    #[test]
+    fn stopwatch_next_update_waits_for_carry() {
+        let cfg = Config {
+            mode: Mode::Stopwatch,
+            ..Config::default()
+        };
+        let t0 = Duration::from_secs(1_000);
+        let mut timer = Timer::new(&cfg, t0);
+        timer.toggle(t0); // 启动秒表
+        // 让秒表走到 elapsed 的小数部分 = 0.9ms 处
+        let t = t0 + Duration::from_millis(2_000) + Duration::from_micros(900);
+        let next = timer
+            .next_update(t)
+            .expect("运行中的秒表应给出下次刷新时刻");
+        assert!(
+            next >= Duration::from_micros(998_900) && next <= Duration::from_micros(999_200),
+            "expected ~999.1ms, got {next:?}"
+        );
+    }
+
+    /// 按 next_update 逐拍推进时，显示值必须每拍恰好减少 1 秒，绝不跳格。
+    #[test]
+    fn countdown_display_never_skips_a_second() {
+        let cfg = Config {
+            mode: Mode::Countdown,
+            duration: "10.0009s".into(),
+            ..Config::default()
+        };
+        let mut now = Duration::from_secs(5_000);
+        let timer = Timer::new(&cfg, now);
+        let secs = |text: &str| -> u64 {
+            let mut parts = text.split(':').map(|p| p.parse::<u64>().unwrap());
+            parts.next().unwrap() * 3600 + parts.next().unwrap() * 60 + parts.next().unwrap()
+        };
+        let mut previous = secs(&timer.display(now));
+        for _ in 0..9 {
+            now += timer.next_update(now).expect("仍在运行");
+            let current = secs(&timer.display(now));
+            assert_eq!(
+                previous - current,
+                1,
+                "display jumped from {previous} to {current} at {now:?}"
+            );
+            previous = current;
+        }
+    }
 }

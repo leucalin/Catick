@@ -61,6 +61,8 @@ pub struct App {
     tray: Option<TrayChannels>,
     /// 上次推送给托盘的显示键，用于避免无谓的 D-Bus 往返
     tray_key: String,
+    /// 调试用：上次重绘时刻
+    last_redraw: std::time::Instant,
 }
 
 struct Drag {
@@ -211,6 +213,7 @@ impl App {
             children: Vec::new(),
             tray,
             tray_key: String::new(),
+            last_redraw: std::time::Instant::now(),
         })
     }
 
@@ -226,6 +229,7 @@ impl App {
         // SAFETY: fd 由 ov 持有，在 ov 存活期间始终有效
         loop {
             let now = timer::now();
+            let t_loop = std::time::Instant::now();
             self.sync_surface_size()?;
 
             let backend_raw = self.ov.poll_fd();
@@ -245,16 +249,34 @@ impl App {
             {
                 timeout = timeout.min(next.clamp(MIN_TIMEOUT, MAX_TIMEOUT));
             }
+            let work = t_loop.elapsed();
+            if work.as_millis() > 50 {
+                debug_log!("loop work before poll took {} ms", work.as_millis());
+            }
+            let t_poll = std::time::Instant::now();
             let ts = Timespec::try_from(timeout)?;
             match poll(&mut fds, Some(&ts)) {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(err) => return Err(err.into()),
             }
+            let waited = t_poll.elapsed();
+            let late = waited.saturating_sub(timeout);
+            if late.as_millis() > 200 {
+                debug_log!(
+                    "poll woke {} ms late (waited {} ms, timeout {} ms)",
+                    late.as_millis(),
+                    waited.as_millis(),
+                    timeout.as_millis()
+                );
+            }
             let backend_readable = fds[0]
                 .revents()
                 .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP);
 
+            // 时刻要用 poll 返回后的新值：旧的 now 可能已经过去了近一个轮询周期，
+            // 用它处理滚轮调时会凭空多算一秒，推给托盘的状态也会晚一拍
+            let now = timer::now();
             for ev in self.ov.drain_events(backend_readable) {
                 self.handle_input(ev, now)?;
             }
@@ -683,6 +705,7 @@ impl App {
 
     /// 有变化（文本/尺寸/编辑态/闪烁）才重新渲染并贴帧。
     fn redraw_if_needed(&mut self) -> Result<(), Box<dyn Error>> {
+        let before = self.frame_text.clone();
         let now = timer::now();
         let text = self.timer.display(now);
         // 归零后 500ms 相位闪烁：弱相位渲染为全透明帧
@@ -703,6 +726,17 @@ impl App {
         let frame = render::render(&style, &text, self.phys_w, self.phys_h, self.edit_mode)?;
         self.ov.present(&frame.pixels, frame.width, frame.height)?;
 
+        if std::env::var_os("CATICK_DEBUG").is_some() {
+            let now_i = std::time::Instant::now();
+            let gap = now_i.duration_since(self.last_redraw);
+            if gap.as_millis() > 1200 {
+                debug_log!(
+                    "redraw {before:?} -> {text:?} after a {} ms gap",
+                    gap.as_millis()
+                );
+            }
+            self.last_redraw = now_i;
+        }
         self.frame = Some(frame);
         self.frame_text = text;
         self.frame_edit = self.edit_mode;
