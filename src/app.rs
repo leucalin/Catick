@@ -63,6 +63,8 @@ pub struct App {
     tray_key: String,
     /// 调试用：上次重绘时刻
     last_redraw: std::time::Instant,
+    /// 进度环图标缓存：(量化键, 22px, 44px)
+    icon_cache: Option<(String, Vec<u8>, Vec<u8>)>,
 }
 
 struct Drag {
@@ -78,6 +80,37 @@ macro_rules! debug_log {
             eprintln!("catick[debug]: {}", format!($($arg)*));
         }
     };
+}
+
+/// 渲染托盘图标（22/44px）。进度环量化到 1/60 圈；图片图标按动画帧取帧。
+fn render_tray_icons(
+    cfg: &Config,
+    timer: &crate::timer::Timer,
+    style: &Style,
+    icon: Option<&crate::icon::IconAnimation>,
+    icon_started: Duration,
+    now: Duration,
+) -> (Vec<u8>, Vec<u8>, bool) {
+    if cfg.tray_icon == TrayIconKind::Image
+        && let Some(anim) = icon
+    {
+        let frame = anim.frame_at(icon_started);
+        return (
+            anim.render(frame, 22).unwrap_or_default(),
+            anim.render(frame, 44).unwrap_or_default(),
+            true,
+        );
+    }
+    const STEPS: f64 = 60.0;
+    let quantized = (timer.progress(now) * STEPS).round() / STEPS;
+    let glyph = crate::render::TrayGlyph {
+        fraction: quantized,
+    };
+    (
+        crate::render::render_icon(glyph, 22, style.color).unwrap_or_default(),
+        crate::render::render_icon(glyph, 44, style.color).unwrap_or_default(),
+        false,
+    )
 }
 
 /// 按配置加载图片托盘图标（失败只记日志，回退进度环）。
@@ -170,8 +203,8 @@ impl App {
         let icon = load_icon(&cfg);
         let icon_started = timer::now();
         let tray = if cfg.tray {
-            let state =
-                tray::build_state(&cfg, &timer, &style, &fonts, icon.as_ref(), icon_started);
+            let icons = render_tray_icons(&cfg, &timer, &style, icon.as_ref(), icon_started, now);
+            let state = tray::build_state(&cfg, &timer, &style, &fonts, icons);
             match tray::spawn(state) {
                 Ok(channels) => Some(channels),
                 Err(err) => {
@@ -214,6 +247,7 @@ impl App {
             tray,
             tray_key: String::new(),
             last_redraw: std::time::Instant::now(),
+            icon_cache: None,
         })
     }
 
@@ -467,7 +501,10 @@ impl App {
 
     /// 显示文本 / 交互状态变化时才把新状态推给托盘。
     fn update_tray(&mut self, now: Duration) {
-        let Some(tray) = &self.tray else { return };
+        // 先取图标（需要 &mut self 做缓存），最后再借用托盘句柄推送
+        if self.tray.is_none() {
+            return;
+        }
         let anim_frame = self
             .icon
             .as_ref()
@@ -490,16 +527,12 @@ impl App {
             return;
         }
         self.tray_key = key;
-        let mut state = tray::build_state(
-            &self.cfg,
-            &self.timer,
-            &self.style,
-            &self.fonts,
-            self.icon.as_ref(),
-            self.icon_started,
-        );
+        let icons = self.tray_icons(now);
+        let mut state = tray::build_state(&self.cfg, &self.timer, &self.style, &self.fonts, icons);
         state.edit_mode = self.edit_mode;
-        tray.handle.update(|t| t.state = state);
+        if let Some(tray) = &self.tray {
+            tray.handle.update(|t| t.state = state);
+        }
     }
 
     fn handle_input(&mut self, ev: Input, now: Duration) -> Result<(), Box<dyn Error>> {
@@ -638,6 +671,46 @@ impl App {
         }
         self.dirty = true;
         Ok(())
+    }
+
+    /// 生成托盘图标（22/44px）。
+    ///
+    /// 进度环按 1/60 圈量化并缓存：量化台阶没变时直接复用上一帧的字节，
+    /// 这样大多数秒不会发出新图标——宿主替换图标那一帧会短暂回落到占位符
+    /// （表现为托盘闪一下）。图片图标按动画帧更新，不参与该缓存。
+    fn tray_icons(&mut self, now: Duration) -> (Vec<u8>, Vec<u8>, bool) {
+        if self.cfg.tray_icon == TrayIconKind::Image && self.icon.is_some() {
+            // 动画图标本来就要逐帧更新，不参与缓存
+            return render_tray_icons(
+                &self.cfg,
+                &self.timer,
+                &self.style,
+                self.icon.as_ref(),
+                self.icon_started,
+                now,
+            );
+        }
+        const STEPS: f64 = 60.0;
+        let quantized = (self.timer.progress(now) * STEPS).round() / STEPS;
+        let key = format!(
+            "{quantized:.4}|{:.3},{:.3},{:.3}",
+            self.style.color.0, self.style.color.1, self.style.color.2
+        );
+        if let Some((cached_key, small, big)) = &self.icon_cache
+            && *cached_key == key
+        {
+            return (small.clone(), big.clone(), false);
+        }
+        let (small, big, _) = render_tray_icons(
+            &self.cfg,
+            &self.timer,
+            &self.style,
+            None,
+            self.icon_started,
+            now,
+        );
+        self.icon_cache = Some((key, small.clone(), big.clone()));
+        (small, big, false)
     }
 
     /// 在后台线程调用文件选择框（对话框会阻塞），结果经命令通道送回主循环。

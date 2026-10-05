@@ -122,15 +122,17 @@ impl Timer {
         }
     }
 
-    /// 托盘进度环比例：倒计时/番茄钟为当前相位剩余占比，
-    /// 秒表/时钟为一分钟内的进度。
+    /// 托盘进度环比例：倒计时/番茄钟为当前相位剩余占比；
+    /// 时钟/秒表为一小时内的进度——环只作为状态指示，不追秒，
+    /// 否则图标每秒都被替换，宿主换图那一帧会闪出占位符。
     pub fn progress(&self, now: Duration) -> f64 {
         match self.mode {
             Mode::Clock => {
                 use chrono::Timelike;
-                chrono::Local::now().second() as f64 / 60.0
+                let now = chrono::Local::now();
+                (now.minute() as f64 * 60.0 + now.second() as f64) / 3600.0
             }
-            Mode::Stopwatch => (self.elapsed_at(now).as_secs_f64() % 60.0) / 60.0,
+            Mode::Stopwatch => (self.elapsed_at(now).as_secs_f64() % 3600.0) / 3600.0,
             Mode::Countdown => (self.remaining_at(now).as_secs_f64()
                 / self.duration.as_secs_f64().max(1.0))
             .clamp(0.0, 1.0),

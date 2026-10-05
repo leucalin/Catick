@@ -431,32 +431,11 @@ pub fn build_state(
     timer: &Timer,
     style: &Style,
     fonts: &[String],
-    icon: Option<&crate::icon::IconAnimation>,
-    icon_started: std::time::Duration,
+    icons: (Vec<u8>, Vec<u8>, bool),
 ) -> TrayState {
     let moment = now();
     let display = timer.display(moment);
-
-    let (icon_small, icon_big, icon_is_image) = match (cfg.tray_icon, icon) {
-        (TrayIconKind::Image, Some(anim)) => {
-            let frame = anim.frame_at(icon_started);
-            (
-                anim.render(frame, 22).unwrap_or_default(),
-                anim.render(frame, 44).unwrap_or_default(),
-                true,
-            )
-        }
-        _ => {
-            let glyph = crate::render::TrayGlyph {
-                fraction: timer.progress(moment),
-            };
-            (
-                crate::render::render_icon(glyph, 22, style.color).unwrap_or_default(),
-                crate::render::render_icon(glyph, 44, style.color).unwrap_or_default(),
-                false,
-            )
-        }
-    };
+    let (icon_small, icon_big, icon_is_image) = icons;
 
     TrayState {
         display,
