@@ -250,6 +250,77 @@ pub fn parse_color(input: &str) -> Option<(f64, f64, f64)> {
     }
 }
 
+/// 托盘菜单提供的颜色预设（名称, `#rrggbb`）。
+pub const COLOR_PRESETS: [(&str, &str); 12] = [
+    ("白色", "#ffffff"),
+    ("黑色", "#000000"),
+    ("灰色", "#9ca3af"),
+    ("红色", "#ff5555"),
+    ("橙色", "#ff9f43"),
+    ("黄色", "#f9ca45"),
+    ("绿色", "#2ecc71"),
+    ("青色", "#22d3ee"),
+    ("蓝色", "#4f8cff"),
+    ("紫色", "#a78bfa"),
+    ("粉色", "#ff7ab6"),
+    ("棕色", "#b08968"),
+];
+
+/// 托盘字体候选：通用族 + 常见等宽/数字字体 ∩ 系统已安装（经 `fc-list`）。
+/// 当前配置的字体总会出现在列表里。
+pub fn available_fonts(current: &str) -> Vec<String> {
+    const NAMED: [&str; 17] = [
+        "JetBrainsMono Nerd Font",
+        "JetBrains Mono",
+        "Fira Code",
+        "Hack",
+        "DejaVu Sans Mono",
+        "Noto Sans Mono",
+        "Noto Sans",
+        "Ubuntu Mono",
+        "Source Code Pro",
+        "Cascadia Code",
+        "Iosevka",
+        "Inter",
+        "Lato",
+        "Shure Tech Mono",
+        "DS-Digital",
+        "Digital-7",
+        "Orbitron",
+    ];
+    let installed = installed_families();
+    let mut fonts: Vec<String> = ["monospace", "sans-serif", "serif"]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    fonts.extend(
+        NAMED
+            .iter()
+            .filter(|name| installed.iter().any(|f| f.eq_ignore_ascii_case(name)))
+            .map(|name| (*name).to_string()),
+    );
+    if !fonts.iter().any(|f| f == current) {
+        fonts.insert(0, current.to_string());
+    }
+    fonts
+}
+
+/// 系统已安装的字体族列表（`fc-list : family`）。
+fn installed_families() -> Vec<String> {
+    // 注意：必须是两个参数（`: family`），否则 fc-list 按路径格式输出
+    let Ok(output) = std::process::Command::new("fc-list")
+        .args([":", "family"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .split(['\n', ','])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +338,14 @@ mod tests {
         assert_eq!(secs(""), None);
         assert_eq!(secs("abc"), None);
         assert_eq!(secs("0"), None);
+    }
+
+    #[test]
+    fn font_list_always_contains_current() {
+        let fonts = available_fonts("monospace");
+        assert!(fonts.iter().any(|f| f == "monospace"));
+        let fonts = available_fonts("Some Custom Font");
+        assert_eq!(fonts.first().map(String::as_str), Some("Some Custom Font"));
     }
 
     #[test]

@@ -51,6 +51,8 @@ pub struct App {
     quit: bool,
     /// on_finish_cmd 的子进程，定期回收防僵尸
     children: Vec<Child>,
+    /// 托盘字体菜单的可选项（启动时探测一次）
+    fonts: Vec<String>,
     /// 系统托盘（可能因缺少 SNI 宿主而未启动）
     tray: Option<TrayChannels>,
     /// 上次推送给托盘的显示键，用于避免无谓的 D-Bus 往返
@@ -61,6 +63,13 @@ struct Drag {
     press_root: (i32, i32),
     win_pos: (i32, i32),
     moved: bool,
+}
+
+/// 把窗口位置夹取到屏幕范围内（整个窗口可见）。
+fn clamp_pos(screen: (u32, u32), pos: (i32, i32), size: (u32, u32)) -> (i32, i32) {
+    let max_x = (screen.0 as i32 - size.0 as i32).max(0);
+    let max_y = (screen.1 as i32 - size.1 as i32).max(0);
+    (pos.0.clamp(0, max_x), pos.1.clamp(0, max_y))
 }
 
 /// 按缩放因子测量渲染尺寸（物理像素）。
@@ -105,6 +114,8 @@ impl App {
             ((screen_w.saturating_sub(w)) / 2) as i32,
             (screen_h / 5) as i32,
         ));
+        // 夹取到屏幕内：配置里可能残留被拖飞时写下的坐标
+        let (x, y) = clamp_pos((screen_w, screen_h), (x, y), (w, h));
         ov.set_geometry(x, y, w, h)?;
         // 编辑模式必须可交互，进入编辑前先关掉穿透
         ov.set_passthrough(cfg.click_through && !edit_mode)?;
@@ -114,8 +125,9 @@ impl App {
         let now = timer::now();
         let timer = Timer::new(&cfg, now);
 
+        let fonts = crate::config::available_fonts(&style.family);
         let tray = if cfg.tray {
-            let state = tray::build_state(&cfg, &timer, &style);
+            let state = tray::build_state(&cfg, &timer, &style, &fonts);
             match tray::spawn(state) {
                 Ok(channels) => Some(channels),
                 Err(err) => {
@@ -148,6 +160,7 @@ impl App {
             dirty: true,
             edit_mode,
             drag: None,
+            fonts,
             phys_w,
             phys_h,
             quit: false,
@@ -285,6 +298,20 @@ impl App {
                 self.dirty = true;
                 persist = true;
             }
+            Command::SetFont(font) => {
+                self.style.family = font.clone();
+                self.cfg.font_family = font;
+                self.dirty = true;
+                persist = true;
+            }
+            Command::SetColor(hex) => {
+                if let Some(rgb) = crate::config::parse_color(&hex) {
+                    self.style.color = rgb;
+                    self.cfg.color = hex;
+                    self.dirty = true;
+                    persist = true;
+                }
+            }
             Command::Quit => {
                 self.shutdown_tray();
                 return Ok(true);
@@ -314,7 +341,7 @@ impl App {
             return;
         }
         self.tray_key = key;
-        let mut state = tray::build_state(&self.cfg, &self.timer, &self.style);
+        let mut state = tray::build_state(&self.cfg, &self.timer, &self.style, &self.fonts);
         state.edit_mode = self.edit_mode;
         tray.handle.update(|t| t.state = state);
     }
@@ -366,10 +393,12 @@ impl App {
                     let moved =
                         drag.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD;
                     let (_, _, w, h) = self.ov.geometry();
-                    // 夹取位置：至少留 32px 在屏幕内，避免窗口被拖丢
-                    let (screen_w, screen_h) = self.ov.screen_size();
-                    let nx = (drag.win_pos.0 + dx).clamp(-(w as i32) + 32, screen_w as i32 - 32);
-                    let ny = (drag.win_pos.1 + dy).clamp(0, screen_h as i32 - 32);
+                    // 夹取位置：整个窗口保持在屏幕内，避免被拖丢
+                    let (nx, ny) = clamp_pos(
+                        self.ov.screen_size(),
+                        (drag.win_pos.0 + dx, drag.win_pos.1 + dy),
+                        (w, h),
+                    );
                     self.ov.set_geometry(nx, ny, w, h)?;
                     if let Some(drag) = self.drag.as_mut() {
                         drag.moved = moved;
@@ -394,9 +423,7 @@ impl App {
         let (nlw, nlh) = logical_size(pw, ph, scale);
         let nx = (cx - nlw as f64 / 2.0).round() as i32;
         let ny = (cy - nlh as f64 / 2.0).round() as i32;
-        let (screen_w, screen_h) = self.ov.screen_size();
-        let nx = nx.clamp(-(nlw as i32) + 32, screen_w as i32 - 32);
-        let ny = ny.clamp(0, screen_h as i32 - 32);
+        let (nx, ny) = clamp_pos(self.ov.screen_size(), (nx, ny), (nlw, nlh));
         self.ov.set_geometry(nx, ny, nlw, nlh)?;
         self.phys_w = pw;
         self.phys_h = ph;
@@ -465,6 +492,8 @@ impl App {
         disk.duration = self.cfg.duration.clone();
         disk.click_through = self.cfg.click_through;
         disk.clock_24h = self.cfg.clock_24h;
+        disk.font_family = self.cfg.font_family.clone();
+        disk.color = self.cfg.color.clone();
         disk.save();
     }
 

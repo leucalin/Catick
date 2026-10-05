@@ -4,7 +4,7 @@
 //! 往唤醒管道写一个字节。主循环据此醒来处理命令并回推新状态
 //! （`Handle::update`），回调里绝不能调用 `update`（会死锁）。
 
-use crate::config::{Config, Mode};
+use crate::config::{COLOR_PRESETS, Config, Mode};
 use crate::render::{self, Style};
 use crate::timer::{PomodoroPhase, Timer, now};
 use ksni::blocking::{Handle, TrayMethods};
@@ -14,7 +14,7 @@ use rustix::fd::OwnedFd;
 use std::sync::mpsc::{Receiver, Sender};
 
 /// 托盘发回主循环的命令。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     TogglePause,
     Reset,
@@ -26,6 +26,8 @@ pub enum Command {
     ToggleClockFormat,
     FontSizeDelta(f64),
     OpacityDelta(f64),
+    SetFont(String),
+    SetColor(String),
     Quit,
 }
 
@@ -39,6 +41,11 @@ pub struct TrayState {
     pub click_through: bool,
     pub clock_24h: bool,
     pub phase: Option<PomodoroPhase>,
+    /// 可选字体（系统已安装的常用字体）与当前字体
+    pub fonts: Vec<String>,
+    pub current_font: String,
+    /// 当前颜色 `#rrggbb`（与 COLOR_PRESETS 比较选中项）
+    pub current_color: String,
     /// 22px / 44px 图标（网络字节序 ARGB32，主线程渲染）
     pub icon_small: Vec<u8>,
     pub icon_big: Vec<u8>,
@@ -208,6 +215,62 @@ impl Tray for CatickTray {
             }
             .into(),
             SubMenu {
+                label: "字体".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: self
+                            .state
+                            .fonts
+                            .iter()
+                            .position(|f| f == &self.state.current_font)
+                            .unwrap_or(usize::MAX),
+                        select: Box::new(|t: &mut Self, index: usize| {
+                            if let Some(font) = t.state.fonts.get(index) {
+                                t.send(Command::SetFont(font.clone()));
+                            }
+                        }),
+                        options: self
+                            .state
+                            .fonts
+                            .iter()
+                            .map(|font| RadioItem {
+                                label: font.clone(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "颜色".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: COLOR_PRESETS
+                            .iter()
+                            .position(|(_, hex)| *hex == self.state.current_color)
+                            .unwrap_or(usize::MAX),
+                        select: Box::new(|t: &mut Self, index: usize| {
+                            if let Some((_, hex)) = COLOR_PRESETS.get(index) {
+                                t.send(Command::SetColor((*hex).to_string()));
+                            }
+                        }),
+                        options: COLOR_PRESETS
+                            .iter()
+                            .map(|(name, _)| RadioItem {
+                                label: (*name).into(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
                 label: "字号".into(),
                 submenu: vec![
                     StandardItem {
@@ -281,11 +344,20 @@ pub fn spawn(state: TrayState) -> Result<TrayChannels, Box<dyn std::error::Error
 }
 
 /// 依据当前计时状态构造托盘状态（含图标渲染）。
-pub fn build_state(cfg: &Config, timer: &Timer, style: &Style) -> TrayState {
-    let display = timer.display(now());
-    let (big_text, small_text) = icon_texts(&display);
-    let icon_small = render::render_icon(&small_text, 22, style).unwrap_or_default();
-    let icon_big = render::render_icon(&big_text, 44, style).unwrap_or_default();
+pub fn build_state(cfg: &Config, timer: &Timer, style: &Style, fonts: &[String]) -> TrayState {
+    let moment = now();
+    let display = timer.display(moment);
+    let glyph = match timer.progress(moment) {
+        Some(fraction) => render::TrayGlyph::Progress { fraction },
+        None => {
+            let (hour, minute) = timer.clock_hands();
+            render::TrayGlyph::Clock { hour, minute }
+        }
+    };
+    // 暂停时图标整体变淡，状态一眼可见
+    let dimmed = !timer.is_running() && timer.mode() != Mode::Clock;
+    let icon_small = render::render_icon(glyph, 22, style.color, dimmed).unwrap_or_default();
+    let icon_big = render::render_icon(glyph, 44, style.color, dimmed).unwrap_or_default();
     TrayState {
         display,
         mode: timer.mode(),
@@ -294,28 +366,18 @@ pub fn build_state(cfg: &Config, timer: &Timer, style: &Style) -> TrayState {
         click_through: cfg.click_through,
         clock_24h: cfg.clock_24h,
         phase: (timer.mode() == Mode::Pomodoro).then(|| timer.phase()),
+        fonts: fonts.to_vec(),
+        current_font: style.family.clone(),
+        current_color: normalize_hex(&cfg.color),
         icon_small,
         icon_big,
     }
 }
 
-/// 计算图标文字：44px 用 `MM:SS`（不足一小时）或 `HH:MM`，22px 只用首个字段。
-fn icon_texts(display: &str) -> (String, String) {
-    let parts: Vec<&str> = display.split(':').collect();
-    let big = if parts.len() == 3 {
-        if parts[0] == "00" {
-            format!("{}:{}", parts[1], parts[2])
-        } else {
-            format!("{}:{}", parts[0], parts[1])
-        }
-    } else {
-        display.to_string()
-    };
-    let small = parts
-        .first()
-        .map(|s| s.trim_start_matches('0'))
-        .filter(|s| !s.is_empty())
-        .unwrap_or("0")
-        .to_string();
-    (big, small)
+/// 规范化颜色写法，便于与预设比较（小写、带 #）。
+fn normalize_hex(color: &str) -> String {
+    format!(
+        "#{}",
+        color.trim().trim_start_matches('#').to_ascii_lowercase()
+    )
 }

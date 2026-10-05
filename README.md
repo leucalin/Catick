@@ -24,9 +24,10 @@ that floats above your windows, and is fully controllable from the system tray.
     KDE…), crisp on HiDPI thanks to fractional-scale support.
   - **X11** — a depth-32 ARGB window via x11rb, for X11 desktops and other
     compositors' XWayland.
-- **System tray (StatusNotifierItem)** — the icon shows the remaining time, and
-  the menu has everything: modes, quick presets, pause/reset, edit mode,
-  click-through, 12/24-hour clock, font size, opacity, quit.
+- **System tray (StatusNotifierItem)** — a vector icon (progress ring for
+  timers, clock face for clock mode) shows the state at a glance, and the menu
+  has everything: modes, quick presets, pause/reset, edit mode, click-through,
+  12/24-hour clock, font picker, color presets, font size, opacity, quit.
 - **Edit mode** — drag to move, scroll to resize the font, Ctrl+scroll for
   opacity; everything is saved as you adjust it.
 - **Config file + CLI overrides** — `~/.config/catick/config.toml` persists
@@ -73,7 +74,7 @@ none is possible for an overlay).
 | Scroll in edit mode             | Font size ±2px                           |
 | Ctrl + scroll in edit mode      | Opacity ±5% ¹                            |
 | Tray left click                 | Enter / exit edit mode                   |
-| Tray right click                | Menu                                     |
+| Tray right click                | Menu (modes, presets, fonts, colors, …)  |
 
 ¹ Modifier combos need pointer modifier state, which Wayland does not deliver
 to overlays. There, use the tray menu's font-size and opacity items instead.
@@ -131,6 +132,10 @@ Verification helpers (see `examples/`):
 
 On niri, `niri msg layers` lists the layer surface and
 `niri msg action screenshot-screen` verifies what is actually on screen.
+
+The release profile is tuned for size (`opt-level = "z"`, fat LTO, `panic =
+"abort"`, stripped): roughly 2.3 MB, dominated by the D-Bus stack the tray
+needs.
 
 ## 🚧 Not (yet) implemented
 

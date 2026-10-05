@@ -118,43 +118,65 @@ pub fn render(
 
 /// 渲染托盘图标：正方形、透明底、居中的小号文字，输出网络字节序 ARGB32
 /// （StatusNotifierItem 的 `Icon.data` 约定）。
+/// 图标是矢量绘制的时钟 / 进度环，不包含文字。
 pub fn render_icon(
-    text: &str,
+    glyph: TrayGlyph,
     size: u32,
-    style: &Style,
+    color: (f64, f64, f64),
+    dimmed: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let s = size as f64;
+    let c = s / 2.0;
     let mut surface = ImageSurface::create(Format::ARgb32, size as i32, size as i32)?;
     let cr = Context::new(&surface)?;
     cr.set_operator(Operator::Clear);
     cr.paint()?;
     cr.set_operator(Operator::Source);
+    let (r, g, b) = color;
+    let full = if dimmed { 0.55 } else { 1.0 };
 
-    // 先按 100px 量一遍，再缩放到刚好塞进图标（留 2px 边距）
-    let probe = Style {
-        size: 100.0,
-        opacity: 1.0,
-        ..style.clone()
-    };
-    apply_font(&cr, &probe);
-    let te = cr.text_extents(text)?;
-    let fe = cr.font_extents()?;
-    let fit_w = (size as f64 - 4.0) / te.x_advance().max(1.0);
-    let fit_h = (size as f64 - 4.0) / fe.height().max(1.0);
-    let probe_size = 100.0 * fit_w.min(fit_h);
-    let icon_style = Style {
-        size: probe_size,
-        opacity: 1.0,
-        ..style.clone()
-    };
-    apply_font(&cr, &icon_style);
-    let (r, g, b) = style.color;
-    cr.set_source_rgba(r, g, b, 1.0);
-    let te = cr.text_extents(text)?;
-    let fe = cr.font_extents()?;
-    let x = (size as f64 - te.x_advance()) / 2.0 - te.x_bearing();
-    let y = (size as f64 - fe.height()) / 2.0 + fe.ascent();
-    cr.move_to(x, y);
-    cr.show_text(text)?;
+    let ring_width = (s / 9.0).max(1.0);
+    let radius = c - ring_width / 2.0 - s / 16.0;
+
+    match glyph {
+        TrayGlyph::Clock { hour, minute } => {
+            // 表盘
+            cr.set_source_rgba(r, g, b, full);
+            cr.set_line_width(ring_width);
+            cr.arc(c, c, radius, 0.0, std::f64::consts::TAU);
+            cr.stroke()?;
+            // 时针 / 分针（12 点方向为 0）
+            let hand =
+                |cr: &Context, len: f64, width: f64, angle: f64| -> Result<(), cairo::Error> {
+                    cr.set_line_width(width);
+                    cr.set_line_cap(cairo::LineCap::Round);
+                    cr.move_to(c, c);
+                    cr.line_to(c + len * angle.sin(), c - len * angle.cos());
+                    cr.stroke()
+                };
+            let hour_angle = hour / 12.0 * std::f64::consts::TAU;
+            let minute_angle = minute / 60.0 * std::f64::consts::TAU;
+            hand(&cr, radius * 0.5, ring_width * 0.9, hour_angle)?;
+            hand(&cr, radius * 0.78, ring_width * 0.6, minute_angle)?;
+        }
+        TrayGlyph::Progress { fraction } => {
+            // 底环
+            cr.set_source_rgba(r, g, b, 0.28);
+            cr.set_line_width(ring_width);
+            cr.arc(c, c, radius, 0.0, std::f64::consts::TAU);
+            cr.stroke()?;
+            // 进度弧：12 点起顺时针
+            let frac = fraction.clamp(0.0, 1.0);
+            if frac > 0.0 {
+                cr.set_source_rgba(r, g, b, full);
+                cr.set_line_width(ring_width);
+                cr.set_line_cap(cairo::LineCap::Round);
+                let start = -std::f64::consts::FRAC_PI_2;
+                cr.arc(c, c, radius, start, start + frac * std::f64::consts::TAU);
+                cr.stroke()?;
+            }
+        }
+    }
 
     drop(cr);
 
@@ -171,6 +193,15 @@ pub fn render_icon(
         }
     }
     Ok(out)
+}
+
+/// 托盘图标的绘制内容。
+#[derive(Debug, Clone, Copy)]
+pub enum TrayGlyph {
+    /// 指针式时钟：`hour` 0..12、`minute` 0..60
+    Clock { hour: f64, minute: f64 },
+    /// 进度环：剩余比例 0..1（倒计时/番茄钟为剩余，秒表为一分钟内的进度）
+    Progress { fraction: f64 },
 }
 
 /// 把一帧写成 PNG（调试与无显示环境验证用）。

@@ -122,6 +122,34 @@ impl Timer {
         }
     }
 
+    /// 托盘进度环比例：倒计时/番茄钟为当前相位剩余占比，秒表为一分钟内的进度；
+    /// 时钟模式返回 None（改用指针）。
+    pub fn progress(&self, now: Duration) -> Option<f64> {
+        match self.mode {
+            Mode::Clock => None,
+            Mode::Stopwatch => Some((self.elapsed_at(now).as_secs_f64() % 60.0) / 60.0),
+            Mode::Countdown => Some(
+                (self.remaining_at(now).as_secs_f64() / self.duration.as_secs_f64().max(1.0))
+                    .clamp(0.0, 1.0),
+            ),
+            Mode::Pomodoro => Some(
+                (self.remaining_at(now).as_secs_f64()
+                    / self.phase_duration(self.phase).as_secs_f64().max(1.0))
+                .clamp(0.0, 1.0),
+            ),
+        }
+    }
+
+    /// 时钟模式的时/分针参数（hour 0..12、minute 0..60）。
+    pub fn clock_hands(&self) -> (f64, f64) {
+        use chrono::Timelike;
+        let now = chrono::Local::now();
+        (
+            now.hour() as f64 % 12.0 + now.minute() as f64 / 60.0,
+            now.minute() as f64 + now.second() as f64 / 60.0,
+        )
+    }
+
     /// 切换 12/24 小时制（时钟模式）。
     pub fn set_clock_24h(&mut self, on: bool) {
         self.clock_24h = on;
