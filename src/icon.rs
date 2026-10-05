@@ -89,9 +89,9 @@ impl IconAnimation {
         let mut out = Vec::with_capacity(row_bytes * size as usize);
         for row in 0..size as usize {
             let start = row * stride;
-            for px in data[start..start + row_bytes].chunks_exact(4) {
-                let v = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
-                out.extend_from_slice(&v.to_be_bytes());
+            let (pixels, _) = data[start..start + row_bytes].as_chunks::<4>();
+            for px in pixels {
+                out.extend_from_slice(&u32::from_le_bytes(*px).to_be_bytes());
             }
         }
         Ok(out)
@@ -126,9 +126,9 @@ fn load_jpeg(path: &Path) -> Result<IconAnimation, Box<dyn std::error::Error>> {
     let (w, h) = (w as u32, h as u32);
     // zune-jpeg 输出 RGB（每像素 3 字节）
     let mut argb = Vec::with_capacity(w as usize * h as usize * 4);
-    for rgb in pixels.chunks_exact(3) {
-        let (r, g, b) = (rgb[0], rgb[1], rgb[2]);
-        argb.extend_from_slice(&[b, g, r, 255]);
+    let (chunks, _) = pixels.as_chunks::<3>();
+    for rgb in chunks {
+        argb.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
     }
     Ok(single_frame(surface_from_argb(w, h, argb)?))
 }
@@ -147,29 +147,34 @@ fn load_gif(path: &Path) -> Result<IconAnimation, Box<dyn std::error::Error>> {
     let mut prev_dispose = gif::DisposalMethod::Keep;
 
     while let Some(frame) = decoder.read_next_frame()? {
-        // 上一帧的处置方式：Background 需要清空其区域
-        if prev_dispose == gif::DisposalMethod::Background
-            && let Some((x, y, fw, fh)) = prev_rect
-        {
-            for row in y..(y + fh).min(h) {
-                for col in x..(x + fw).min(w) {
-                    let i = ((row * w + col) * 4) as usize;
-                    canvas[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
-                }
-            }
-        }
         let (fx, fy) = (frame.left as u32, frame.top as u32);
         let (fw, fh) = (frame.width as u32, frame.height as u32);
-        for row in 0..fh {
-            for col in 0..fw {
-                let (dx, dy) = (fx + col, fy + row);
-                if dx >= w || dy >= h {
-                    continue;
-                }
-                let src = ((row * fw + col) * 4) as usize;
-                let dst = ((dy * w + dx) * 4) as usize;
-                canvas[dst..dst + 4].copy_from_slice(&frame.buffer[src..src + 4]);
+        // 上一帧的处置方式：Background 需要先清空它的区域
+        if prev_dispose == gif::DisposalMethod::Background
+            && let Some((x, y, pw, ph)) = prev_rect
+        {
+            let cols = pw.min(w.saturating_sub(x)) as usize * 4;
+            for row in canvas
+                .chunks_mut(w as usize * 4)
+                .skip(y as usize)
+                .take(ph.min(h.saturating_sub(y)) as usize)
+            {
+                let start = x as usize * 4;
+                row[start..start + cols].fill(0);
             }
+        }
+        // 把这一帧（可能只是子矩形）拷进画布
+        let cols = fw.min(w.saturating_sub(fx)) as usize * 4;
+        let src_stride = fw as usize * 4;
+        for (row, dst_row) in canvas
+            .chunks_mut(w as usize * 4)
+            .skip(fy as usize)
+            .take(fh.min(h.saturating_sub(fy)) as usize)
+            .enumerate()
+        {
+            let src = row * src_stride;
+            let dst = fx as usize * 4;
+            dst_row[dst..dst + cols].copy_from_slice(&frame.buffer[src..src + cols]);
         }
         frames.push(to_argb_surface(w, h, &canvas)?);
         // GIF 的 delay 单位是 1/100 秒；0 视为 100ms（浏览器惯例）
@@ -211,7 +216,8 @@ fn to_argb_surface(
     rgba: &[u8],
 ) -> Result<ImageSurface, Box<dyn std::error::Error>> {
     let mut argb = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    let (chunks, _) = rgba.as_chunks::<4>();
+    for px in chunks {
         let a = u32::from(px[3]);
         let premul = |c: u8| ((u32::from(c) * a + 127) / 255) as u8;
         argb.extend_from_slice(&[premul(px[2]), premul(px[1]), premul(px[0]), px[3]]);

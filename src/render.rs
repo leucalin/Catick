@@ -166,9 +166,9 @@ pub fn render_icon(
     let mut out = Vec::with_capacity(row_bytes * size as usize);
     for row in 0..size as usize {
         let start = row * stride;
-        for px in data[start..start + row_bytes].chunks_exact(4) {
-            let v = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
-            out.extend_from_slice(&v.to_be_bytes());
+        let (pixels, _) = data[start..start + row_bytes].as_chunks::<4>();
+        for px in pixels {
+            out.extend_from_slice(&u32::from_le_bytes(*px).to_be_bytes());
         }
     }
     Ok(out)
