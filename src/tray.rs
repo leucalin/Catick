@@ -347,12 +347,8 @@ pub fn spawn(state: TrayState) -> Result<TrayChannels, Box<dyn std::error::Error
 pub fn build_state(cfg: &Config, timer: &Timer, style: &Style, fonts: &[String]) -> TrayState {
     let moment = now();
     let display = timer.display(moment);
-    let glyph = match timer.progress(moment) {
-        Some(fraction) => render::TrayGlyph::Progress { fraction },
-        None => {
-            let (hour, minute) = timer.clock_hands();
-            render::TrayGlyph::Clock { hour, minute }
-        }
+    let glyph = render::TrayGlyph {
+        fraction: timer.progress(moment),
     };
     // 暂停时图标整体变淡，状态一眼可见
     let dimmed = !timer.is_running() && timer.mode() != Mode::Clock;

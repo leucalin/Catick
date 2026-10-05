@@ -116,9 +116,8 @@ pub fn render(
     })
 }
 
-/// 渲染托盘图标：正方形、透明底、居中的小号文字，输出网络字节序 ARGB32
+/// 渲染托盘图标：矢量进度环（不含文字），输出网络字节序 ARGB32
 /// （StatusNotifierItem 的 `Icon.data` 约定）。
-/// 图标是矢量绘制的时钟 / 进度环，不包含文字。
 pub fn render_icon(
     glyph: TrayGlyph,
     size: u32,
@@ -138,44 +137,20 @@ pub fn render_icon(
     let ring_width = (s / 9.0).max(1.0);
     let radius = c - ring_width / 2.0 - s / 16.0;
 
-    match glyph {
-        TrayGlyph::Clock { hour, minute } => {
-            // 表盘
-            cr.set_source_rgba(r, g, b, full);
-            cr.set_line_width(ring_width);
-            cr.arc(c, c, radius, 0.0, std::f64::consts::TAU);
-            cr.stroke()?;
-            // 时针 / 分针（12 点方向为 0）
-            let hand =
-                |cr: &Context, len: f64, width: f64, angle: f64| -> Result<(), cairo::Error> {
-                    cr.set_line_width(width);
-                    cr.set_line_cap(cairo::LineCap::Round);
-                    cr.move_to(c, c);
-                    cr.line_to(c + len * angle.sin(), c - len * angle.cos());
-                    cr.stroke()
-                };
-            let hour_angle = hour / 12.0 * std::f64::consts::TAU;
-            let minute_angle = minute / 60.0 * std::f64::consts::TAU;
-            hand(&cr, radius * 0.5, ring_width * 0.9, hour_angle)?;
-            hand(&cr, radius * 0.78, ring_width * 0.6, minute_angle)?;
-        }
-        TrayGlyph::Progress { fraction } => {
-            // 底环
-            cr.set_source_rgba(r, g, b, 0.28);
-            cr.set_line_width(ring_width);
-            cr.arc(c, c, radius, 0.0, std::f64::consts::TAU);
-            cr.stroke()?;
-            // 进度弧：12 点起顺时针
-            let frac = fraction.clamp(0.0, 1.0);
-            if frac > 0.0 {
-                cr.set_source_rgba(r, g, b, full);
-                cr.set_line_width(ring_width);
-                cr.set_line_cap(cairo::LineCap::Round);
-                let start = -std::f64::consts::FRAC_PI_2;
-                cr.arc(c, c, radius, start, start + frac * std::f64::consts::TAU);
-                cr.stroke()?;
-            }
-        }
+    // 底环
+    cr.set_source_rgba(r, g, b, 0.28);
+    cr.set_line_width(ring_width);
+    cr.arc(c, c, radius, 0.0, std::f64::consts::TAU);
+    cr.stroke()?;
+    // 进度弧：12 点起顺时针
+    let frac = glyph.fraction.clamp(0.0, 1.0);
+    if frac > 0.0 {
+        cr.set_source_rgba(r, g, b, full);
+        cr.set_line_width(ring_width);
+        cr.set_line_cap(cairo::LineCap::Round);
+        let start = -std::f64::consts::FRAC_PI_2;
+        cr.arc(c, c, radius, start, start + frac * std::f64::consts::TAU);
+        cr.stroke()?;
     }
 
     drop(cr);
@@ -195,13 +170,10 @@ pub fn render_icon(
     Ok(out)
 }
 
-/// 托盘图标的绘制内容。
+/// 托盘图标：进度环，`fraction` 为剩余比例 0..1。
 #[derive(Debug, Clone, Copy)]
-pub enum TrayGlyph {
-    /// 指针式时钟：`hour` 0..12、`minute` 0..60
-    Clock { hour: f64, minute: f64 },
-    /// 进度环：剩余比例 0..1（倒计时/番茄钟为剩余，秒表为一分钟内的进度）
-    Progress { fraction: f64 },
+pub struct TrayGlyph {
+    pub fraction: f64,
 }
 
 /// 把一帧写成 PNG（调试与无显示环境验证用）。

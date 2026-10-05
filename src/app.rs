@@ -65,6 +65,15 @@ struct Drag {
     moved: bool,
 }
 
+/// 调试日志：`CATICK_DEBUG=1` 时输出拖动等细节。
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if std::env::var_os("CATICK_DEBUG").is_some() {
+            eprintln!("catick[debug]: {}", format!($($arg)*));
+        }
+    };
+}
+
 /// 把窗口位置夹取到屏幕范围内（整个窗口可见）。
 fn clamp_pos(screen: (u32, u32), pos: (i32, i32), size: (u32, u32)) -> (i32, i32) {
     let max_x = (screen.0 as i32 - size.0 as i32).max(0);
@@ -356,6 +365,7 @@ impl App {
             } => match button {
                 1 => {
                     let (wx, wy, _, _) = self.ov.geometry();
+                    debug_log!("press root=({root_x},{root_y}) win=({wx},{wy})");
                     self.drag = Some(Drag {
                         press_root: (root_x, root_y),
                         win_pos: (wx, wy),
@@ -376,6 +386,7 @@ impl App {
                 if let Some(drag) = self.drag.take() {
                     if drag.moved {
                         let (x, y, _, _) = self.ov.geometry();
+                        debug_log!("release moved -> ({x},{y})");
                         self.cfg.position = Some(Position { x, y });
                         self.persist();
                     } else {
@@ -399,6 +410,7 @@ impl App {
                         (drag.win_pos.0 + dx, drag.win_pos.1 + dy),
                         (w, h),
                     );
+                    debug_log!("motion root=({root_x},{root_y}) d=({dx},{dy}) -> ({nx},{ny})");
                     self.ov.set_geometry(nx, ny, w, h)?;
                     if let Some(drag) = self.drag.as_mut() {
                         drag.moved = moved;

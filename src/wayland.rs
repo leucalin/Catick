@@ -18,6 +18,9 @@ use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
 };
+use wayland_protocols::wp::relative_pointer::zv1::client::{
+    zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1,
+};
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use zwlr_layer_shell_v1::Layer;
@@ -58,6 +61,14 @@ struct State {
     output_phys: Option<(i32, i32)>,
     /// 指针的 surface 局部坐标
     pointer_pos: (f64, f64),
+    /// relative-pointer（拖动用它拿到不受窗口移动影响的纯指针位移）
+    relative_mgr: Option<zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1>,
+    relative: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
+    /// 拖动状态：按键按下期间累计相对位移，作为虚拟根坐标
+    button_down: bool,
+    virtual_pos: (f64, f64),
+    /// 自上次相对事件以来窗口被移动的量（测量/补偿用）
+    applied_since_rel: (f64, f64),
     /// 位置记账（见 `PosTracker`）
     pos: PosTracker,
     sync_callback: Option<wl_callback::WlCallback>,
@@ -154,6 +165,7 @@ impl WaylandOverlay {
         state.seat = globals.bind(&qh, 1..=7, ()).ok();
         state.viewporter = globals.bind(&qh, 1..=1, ()).ok();
         state.fractional_mgr = globals.bind(&qh, 1..=1, ()).ok();
+        state.relative_mgr = globals.bind(&qh, 1..=1, ()).ok();
         let output_global = globals
             .contents()
             .clone_list()
@@ -214,6 +226,16 @@ impl WaylandOverlay {
             h: 1,
         };
         overlay.wait_configured(Duration::from_secs(5))?;
+        if std::env::var_os("CATICK_DEBUG").is_some() {
+            eprintln!(
+                "catick[debug]: wayland 能力 seat={} pointer={} relative_mgr={} relative={} fractional={}",
+                overlay.state.seat.is_some(),
+                overlay.state.pointer.is_some(),
+                overlay.state.relative_mgr.is_some(),
+                overlay.state.relative.is_some(),
+                overlay.state.fractional.is_some(),
+            );
+        }
         Ok(overlay)
     }
 
@@ -295,6 +317,8 @@ impl Overlay for WaylandOverlay {
         if let Some(surface) = &self.state.surface {
             surface.commit();
         }
+        self.state.applied_since_rel.0 += (x - self.x) as f64;
+        self.state.applied_since_rel.1 += (y - self.y) as f64;
         self.x = x;
         self.y = y;
         self.w = w;
@@ -521,7 +545,13 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         {
             if caps.contains(wl_seat::Capability::Pointer) {
                 if state.pointer.is_none() {
-                    state.pointer = Some(seat.get_pointer(qh, ()));
+                    let pointer = seat.get_pointer(qh, ());
+                    // 拖动用：相对位移不受窗口自身移动影响
+                    state.relative = state
+                        .relative_mgr
+                        .as_ref()
+                        .map(|mgr| mgr.get_relative_pointer(&pointer, qh, ()));
+                    state.pointer = Some(pointer);
                 }
             } else {
                 state.pointer = None;
@@ -554,6 +584,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 ..
             } => {
                 state.pointer_pos = (surface_x, surface_y);
+                // 相对指针拖动期间必须忽略绝对坐标：窗口自身移动会改变局部
+                // 坐标，与相对位移叠加后会互相放大（拖动瞬间飞出屏幕）
+                if state.button_down && state.relative.is_some() {
+                    return;
+                }
                 let (x, y) = root(state);
                 state.pending.push(Input::Motion {
                     root_x: x,
@@ -571,9 +606,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     BTN_MIDDLE => 2,
                     _ => return,
                 };
-                let (x, y) = root(state);
+                // 按下时把虚拟指针归零到当前局部坐标；有 relative-pointer 时，
+                // 整次拖动的根坐标都基于它，避免与「局部 + 确认位置」混用基准。
+                let (x, y) = if state.relative.is_some() {
+                    state.virtual_pos = state.pointer_pos;
+                    (
+                        state.virtual_pos.0.round() as i32,
+                        state.virtual_pos.1.round() as i32,
+                    )
+                } else {
+                    root(state)
+                };
                 // Wayland 指针事件不携带修饰键：Ctrl/Shift 组合请使用托盘菜单
                 if button_state == wl_pointer::ButtonState::Pressed {
+                    state.button_down = true;
                     state.pending.push(Input::ButtonPress {
                         button: code,
                         modifiers: Modifiers::default(),
@@ -581,6 +627,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                         root_y: y,
                     });
                 } else {
+                    state.button_down = false;
                     state.pending.push(Input::ButtonRelease { button: code });
                 }
             }
@@ -627,6 +674,37 @@ impl Dispatch<wl_callback::WlCallback, ()> for State {
 }
 
 ignore_events!(wl_display::WlDisplay);
+ignore_events!(zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1);
+
+impl Dispatch<zwp_relative_pointer_v1::ZwpRelativePointerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        event: zwp_relative_pointer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_relative_pointer_v1::Event::RelativeMotion { dx, dy, .. } = event {
+            if std::env::var_os("CATICK_DEBUG").is_some() {
+                eprintln!(
+                    "catick[debug]: rel dx={dx:.1} dy={dy:.1} applied_since_rel=({:.1},{:.1})",
+                    state.applied_since_rel.0, state.applied_since_rel.1
+                );
+            }
+            state.applied_since_rel = (0.0, 0.0);
+            // 只有按住按键（拖动中）才把位移转成拖动事件
+            if state.button_down {
+                state.virtual_pos.0 += dx;
+                state.virtual_pos.1 += dy;
+                state.pending.push(Input::Motion {
+                    root_x: state.virtual_pos.0.round() as i32,
+                    root_y: state.virtual_pos.1.round() as i32,
+                });
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
