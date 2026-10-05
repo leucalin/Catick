@@ -179,7 +179,10 @@ impl Config {
         if let Some(dir) = path.parent()
             && let Err(err) = std::fs::create_dir_all(dir)
         {
-            eprintln!("catick: cannot create config directory {}: {err}", dir.display());
+            eprintln!(
+                "catick: cannot create config directory {}: {err}",
+                dir.display()
+            );
             return;
         }
         match toml::to_string_pretty(self) {

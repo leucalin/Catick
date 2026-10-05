@@ -353,7 +353,11 @@ impl Overlay for WaylandOverlay {
         pool.destroy();
         drop(file);
 
-        let surface = self.state.surface.clone().ok_or("Wayland: missing surface")?;
+        let surface = self
+            .state
+            .surface
+            .clone()
+            .ok_or("Wayland: missing surface")?;
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, rw, rh);
         if let Some(viewport) = &self.state.viewport {

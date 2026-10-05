@@ -160,7 +160,11 @@ impl Tray for CatickTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let t = self.state.lang.t();
         let en = self.state.lang.resolved() == Lang::En;
-        let pause_label = if self.state.running { t.pause } else { t.resume };
+        let pause_label = if self.state.running {
+            t.pause
+        } else {
+            t.resume
+        };
         // 时钟模式下没有暂停/重置的概念
         let timer_actions = self.state.mode != Mode::Clock;
         let mode_index = match self.state.mode {
@@ -190,26 +194,28 @@ impl Tray for CatickTray {
             MenuItem::Separator,
             SubMenu {
                 label: t.mode.into(),
-                submenu: vec![RadioGroup {
-                    selected: mode_index,
-                    select: Box::new(|tray: &mut Self, index: usize| {
-                        let mode = match index {
-                            0 => Mode::Clock,
-                            1 => Mode::Countdown,
-                            2 => Mode::Stopwatch,
-                            _ => Mode::Pomodoro,
-                        };
-                        tray.send(Command::SetMode(mode));
-                    }),
-                    options: [t.clock, t.countdown, t.stopwatch, t.pomodoro]
-                        .iter()
-                        .map(|label| RadioItem {
-                            label: (*label).into(),
-                            ..Default::default()
-                        })
-                        .collect(),
-                }
-                .into()],
+                submenu: vec![
+                    RadioGroup {
+                        selected: mode_index,
+                        select: Box::new(|tray: &mut Self, index: usize| {
+                            let mode = match index {
+                                0 => Mode::Clock,
+                                1 => Mode::Countdown,
+                                2 => Mode::Stopwatch,
+                                _ => Mode::Pomodoro,
+                            };
+                            tray.send(Command::SetMode(mode));
+                        }),
+                        options: [t.clock, t.countdown, t.stopwatch, t.pomodoro]
+                            .iter()
+                            .map(|label| RadioItem {
+                                label: (*label).into(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
                 ..Default::default()
             }
             .into(),
@@ -288,25 +294,27 @@ impl Tray for CatickTray {
                     .into(),
                     SubMenu {
                         label: t.color.into(),
-                        submenu: vec![RadioGroup {
-                            selected: COLOR_PRESETS
-                                .iter()
-                                .position(|(_, _, hex)| *hex == self.state.current_color)
-                                .unwrap_or(usize::MAX),
-                            select: Box::new(|tray: &mut Self, index: usize| {
-                                if let Some((_, _, hex)) = COLOR_PRESETS.get(index) {
-                                    tray.send(Command::SetColor((*hex).to_string()));
-                                }
-                            }),
-                            options: COLOR_PRESETS
-                                .iter()
-                                .map(|(zh, en_name, _)| RadioItem {
-                                    label: if en { (*en_name).into() } else { (*zh).into() },
-                                    ..Default::default()
-                                })
-                                .collect(),
-                        }
-                        .into()],
+                        submenu: vec![
+                            RadioGroup {
+                                selected: COLOR_PRESETS
+                                    .iter()
+                                    .position(|(_, _, hex)| *hex == self.state.current_color)
+                                    .unwrap_or(usize::MAX),
+                                select: Box::new(|tray: &mut Self, index: usize| {
+                                    if let Some((_, _, hex)) = COLOR_PRESETS.get(index) {
+                                        tray.send(Command::SetColor((*hex).to_string()));
+                                    }
+                                }),
+                                options: COLOR_PRESETS
+                                    .iter()
+                                    .map(|(zh, en_name, _)| RadioItem {
+                                        label: if en { (*en_name).into() } else { (*zh).into() },
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                            }
+                            .into(),
+                        ],
                         ..Default::default()
                     }
                     .into(),
@@ -357,24 +365,26 @@ impl Tray for CatickTray {
                     .into(),
                     SubMenu {
                         label: t.language.into(),
-                        submenu: vec![RadioGroup {
-                            selected: lang_index,
-                            select: Box::new(|tray: &mut Self, index: usize| {
-                                tray.send(Command::SetLanguage(if index == 1 {
-                                    Lang::En
-                                } else {
-                                    Lang::Zh
-                                }));
-                            }),
-                            options: [Lang::Zh, Lang::En]
-                                .iter()
-                                .map(|lang| RadioItem {
-                                    label: lang.label().into(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                        }
-                        .into()],
+                        submenu: vec![
+                            RadioGroup {
+                                selected: lang_index,
+                                select: Box::new(|tray: &mut Self, index: usize| {
+                                    tray.send(Command::SetLanguage(if index == 1 {
+                                        Lang::En
+                                    } else {
+                                        Lang::Zh
+                                    }));
+                                }),
+                                options: [Lang::Zh, Lang::En]
+                                    .iter()
+                                    .map(|lang| RadioItem {
+                                        label: lang.label().into(),
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                            }
+                            .into(),
+                        ],
                         ..Default::default()
                     }
                     .into(),

@@ -158,7 +158,10 @@ impl App {
         if let Some(path) = cfg.font_path.clone() {
             match crate::render::register_font_file(&path) {
                 Some(family) => style.family = family,
-                None => eprintln!("catick: failed to register font file {path}, falling back to {}", style.family),
+                None => eprintln!(
+                    "catick: failed to register font file {path}, falling back to {}",
+                    style.family
+                ),
             }
         }
         let fonts = crate::config::available_fonts(&style.family);
@@ -422,7 +425,8 @@ impl App {
             }
             Command::OpenConfigDir => {
                 // 用系统文件管理器打开配置目录（后台进程，不阻塞主循环）
-                if let Some(dir) = crate::config::Config::path().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                if let Some(dir) =
+                    crate::config::Config::path().and_then(|p| p.parent().map(|d| d.to_path_buf()))
                     && let Err(err) = std::process::Command::new("xdg-open").arg(&dir).spawn()
                 {
                     eprintln!("catick: failed to open {}: {err}", dir.display());
