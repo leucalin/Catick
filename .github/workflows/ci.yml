@@ -24,6 +24,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libcairo2-dev libwayland-dev libfontconfig1-dev libfreetype-dev pkg-config
 
+      - name: Toolchain version
+        run: rustc --version && cargo clippy --version
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Format

@@ -12,6 +12,15 @@ cargo clippy --all-targets -- -D warnings  # CI enforces zero warnings
 cargo fmt                                  # rustfmt defaults; CI checks --check
 ```
 
+CI tracks the latest stable toolchain, so a newer clippy can fail the build
+with lints your local (older) toolchain does not know — `chunks_exact_to_as_chunks`
+did exactly that. Before pushing, verify with a matching toolchain:
+
+```sh
+rustup toolchain install stable --component clippy,rustfmt   # or keep your default current
+cargo +stable clippy --all-targets -- -D warnings
+```
+
 Interactive verification without xdotool (X11 backend only):
 
 ```sh
