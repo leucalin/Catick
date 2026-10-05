@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cairo-rs = { version = "0.22", default-features = false, features = ["png"] }
 x11rb = { version = "0.14.0", features = ["shape"] }
 clap = { version = "4", features = ["derive"] }
 rustix = { version = "1", features = ["event", "mm", "pipe", "time"] }

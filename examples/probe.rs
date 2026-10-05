@@ -28,13 +28,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (img.data[i + 3], img.data[i + 2], img.data[i + 1], img.data[i])
     };
     for (label, x, y) in [
-        ("左上边框", 1, 1),
-        ("内部填充", w / 2, h / 2),
-        ("左下角", 1, h - 2),
+        ("左上角", 0, 0),
+        ("正中", w / 2, h / 2),
+        ("右下角", w - 1, h - 1),
     ] {
         let (a, r, g, b) = sample(x, y);
         println!("{label} ({x},{y}): A={a} R={r} G={g} B={b}");
     }
+
+    // alpha 统计：验证「大部分透明、存在不透明文字像素」
+    let total = (w * h) as usize;
+    let mut opaque = 0usize;
+    let mut max_alpha = 0u8;
+    for i in 0..total {
+        let a = img.data[i * 4 + 3];
+        if a > 0 {
+            opaque += 1;
+        }
+        max_alpha = max_alpha.max(a);
+    }
+    println!(
+        "alpha：最大={max_alpha}，非透明像素 {opaque}/{total}（{:.1}%）",
+        opaque as f64 / total as f64 * 100.0
+    );
     Ok(())
 }
 

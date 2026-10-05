@@ -1,5 +1,6 @@
 mod config;
 mod overlay;
+mod render;
 mod wayland;
 mod x11;
 
@@ -122,26 +123,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut ov = overlay::create(&cfg)?;
+    // 渲染参数：窗口尺寸取「模板字符串」的度量，避免秒数变化导致宽度抖动
+    let style = render::Style::from_config(&cfg);
+    let template = TIMER_TEMPLATE;
+    let text = placeholder_text(&cfg);
 
-    // TODO(步骤 4): 窗口尺寸与位置由 cairo 的文字测量结果决定，
-    // 这里先用固定尺寸验证「创建窗口 → 贴帧 → 事件循环」整条链路。
+    if let Some(path) = &cli.dump_png {
+        let (w, h) = render::measure(&style, template);
+        let frame = render::render(&style, &text, w, h)?;
+        render::dump_png(frame, path)?;
+        println!("catick: 已输出 {w}x{h} 帧到 {}", path.display());
+        return Ok(());
+    }
+
+    let mut ov = overlay::create(&cfg)?;
     let (screen_w, screen_h) = ov.screen_size();
-    let (w, h) = (320u32, 120u32);
+    let (w, h) = render::measure(&style, template);
     let (x, y) = cfg.position.map(|p| (p.x, p.y)).unwrap_or((
         ((screen_w.saturating_sub(w)) / 2) as i32,
         (screen_h / 5) as i32,
     ));
     ov.set_geometry(x, y, w, h)?;
     ov.set_passthrough(cfg.click_through)?;
-    let frame = test_pattern(w, h);
-    ov.present(&frame)?;
+    let frame = render::render(&style, &text, w, h)?;
+    ov.present(&frame.pixels)?;
     println!(
-        "catick: 已显示测试窗口 {w}x{h} @ ({x},{y})，click_through={}，模式={:?} 时长={:?} 颜色={:?}（Ctrl+C 退出）",
-        cfg.click_through,
-        cfg.mode,
-        cfg.duration(),
-        cfg.color_rgb(),
+        "catick: 已显示 {w}x{h} @ ({x},{y})，click_through={}，模式={:?} 文本={text:?}（Ctrl+C 退出）",
+        cfg.click_through, cfg.mode,
     );
 
     // TODO(步骤 5): 换成 App 事件循环（计时调度、交互、托盘命令）。
@@ -171,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Input::Redraw => {
                     let (gx, gy, gw, gh) = ov.geometry();
                     println!("redraw @ {gx},{gy} {gw}x{gh}");
-                    ov.present(&frame)?;
+                    ov.present(&frame.pixels)?;
                 }
             }
         }
@@ -179,20 +187,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// 步骤 3 的占位帧：半透明填充 + 亮边，用于肉眼确认贴图与透明效果。
-/// 数值为预乘 alpha 的 ARGB32（小端字节序 B,G,R,A）。
-fn test_pattern(w: u32, h: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
-    for y in 0..h {
-        for x in 0..w {
-            let i = ((y as usize * w as usize) + x as usize) * 4;
-            let border = x < 2 || y < 2 || x + 2 >= w || y + 2 >= h;
-            if border {
-                buf[i..i + 4].copy_from_slice(&[230, 230, 230, 230]);
-            } else {
-                buf[i..i + 4].copy_from_slice(&[60, 30, 20, 160]);
-            }
-        }
-    }
-    buf
+/// 尺寸测量用的模板：所有计时模式都是等宽的 `HH:MM:SS`。
+const TIMER_TEMPLATE: &str = "88:88:88";
+
+/// TODO(步骤 5): 由 timer 状态机给出显示文本；此前先展示配置的倒计时时长。
+fn placeholder_text(cfg: &Config) -> String {
+    let secs = cfg.duration().as_secs();
+    format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
 }
