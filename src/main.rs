@@ -1,11 +1,16 @@
 mod config;
+mod overlay;
+mod wayland;
+mod x11;
 
 use clap::Parser;
 use config::{Backend, Config, Mode, Position};
+use overlay::Input;
+use rustix::event::{PollFd, PollFlags, poll};
+use rustix::time::Timespec;
+use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
-use x11rb::connection::Connection;
-use x11rb::protocol::xproto::*;
-use x11rb::rust_connection::RustConnection;
+use std::time::Duration;
 
 /// Catime 风格的 Linux 桌面计时器：透明悬浮窗 + 系统托盘。
 #[derive(Parser, Debug)]
@@ -117,63 +122,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // 后续步骤会接入 Overlay 后端与 App 事件循环，这里暂时保留原型窗口。
-    let _ = &cli.dump_png;
+    let mut ov = overlay::create(&cfg)?;
+
+    // TODO(步骤 4): 窗口尺寸与位置由 cairo 的文字测量结果决定，
+    // 这里先用固定尺寸验证「创建窗口 → 贴帧 → 事件循环」整条链路。
+    let (screen_w, screen_h) = ov.screen_size();
+    let (w, h) = (320u32, 120u32);
+    let (x, y) = cfg.position.map(|p| (p.x, p.y)).unwrap_or((
+        ((screen_w.saturating_sub(w)) / 2) as i32,
+        (screen_h / 5) as i32,
+    ));
+    ov.set_geometry(x, y, w, h)?;
+    ov.set_passthrough(cfg.click_through)?;
+    let frame = test_pattern(w, h);
+    ov.present(&frame)?;
     println!(
-        "catick: mode={:?} duration={:?} font={} {:.0}px color={:?} opacity={:.2} click_through={}",
+        "catick: 已显示测试窗口 {w}x{h} @ ({x},{y})，click_through={}，模式={:?} 时长={:?} 颜色={:?}（Ctrl+C 退出）",
+        cfg.click_through,
         cfg.mode,
         cfg.duration(),
-        cfg.font_family,
-        cfg.font_size,
         cfg.color_rgb(),
-        cfg.opacity,
-        cfg.click_through,
     );
-    prototype()?;
-    Ok(())
-}
 
-/// 原型窗口：验证 ARGB visual / override-redirect 窗口能正常创建。
-fn prototype() -> Result<(), Box<dyn std::error::Error>> {
-    let (conn, screen_num) = x11rb::connect(None)?;
-    let screen = &conn.setup().roots[screen_num];
-    let root = screen.root;
-
-    let (visual_id, depth) = find_argb_visual(&conn, screen_num).unwrap();
-
-    let colormap = conn.generate_id()?;
-    conn.create_colormap(ColormapAlloc::NONE, colormap, root, visual_id)?;
-
-    let win_id = conn.generate_id()?;
-    conn.create_window(
-        depth,
-        win_id,
-        root,
-        0,
-        0,
-        100,
-        100,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        visual_id,
-        &CreateWindowAux::new().background_pixel(0).border_pixel(0).colormap(colormap).override_redirect(1).event_mask(EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY),
-    )?;
-    conn.map_window(win_id)?;
-    conn.flush()?;
+    // TODO(步骤 5): 换成 App 事件循环（计时调度、交互、托盘命令）。
+    let fd = {
+        // SAFETY: fd 由 ov 持有，在 ov 存活期间始终有效
+        unsafe { BorrowedFd::borrow_raw(ov.event_fd()) }
+    };
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
     loop {
-        println!("Event: {:?}", conn.wait_for_event()?);
+        let timeout = Timespec::try_from(Duration::from_millis(500))?;
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(err) => return Err(err.into()),
+        }
+        for ev in ov.drain_events() {
+            match ev {
+                Input::ButtonPress { button, root_x, root_y } => {
+                    println!("press button={button} @ {root_x},{root_y}");
+                }
+                Input::ButtonRelease { button, root_x, root_y } => {
+                    println!("release button={button} @ {root_x},{root_y}");
+                }
+                Input::Motion { root_x, root_y } => {
+                    println!("motion @ {root_x},{root_y}");
+                }
+                Input::Redraw => {
+                    let (gx, gy, gw, gh) = ov.geometry();
+                    println!("redraw @ {gx},{gy} {gw}x{gh}");
+                    ov.present(&frame)?;
+                }
+            }
+        }
+        ov.flush()?;
     }
 }
 
-/// 找到 depth-32 的 ARGB visual（透明窗口所需）。
-fn find_argb_visual(conn: &RustConnection, screen_num: usize) -> Option<(Visualid, u8)> {
-    let screen = &conn.setup().roots[screen_num];
-    for depth in &screen.allowed_depths {
-        if depth.depth == 32
-            && let Some(visual) = depth.visuals.first()
-        {
-            return Some((visual.visual_id, depth.depth));
+/// 步骤 3 的占位帧：半透明填充 + 亮边，用于肉眼确认贴图与透明效果。
+/// 数值为预乘 alpha 的 ARGB32（小端字节序 B,G,R,A）。
+fn test_pattern(w: u32, h: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y as usize * w as usize) + x as usize) * 4;
+            let border = x < 2 || y < 2 || x + 2 >= w || y + 2 >= h;
+            if border {
+                buf[i..i + 4].copy_from_slice(&[230, 230, 230, 230]);
+            } else {
+                buf[i..i + 4].copy_from_slice(&[60, 30, 20, 160]);
+            }
         }
     }
-    None
+    buf
 }

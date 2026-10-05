@@ -7,6 +7,7 @@ name = "Catick"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rustix",
  "serde",
  "toml",
  "x11rb",
