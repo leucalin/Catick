@@ -10,12 +10,27 @@ use std::os::fd::RawFd;
 
 pub type OverlayResult<T> = Result<T, Box<dyn Error>>;
 
+/// 修饰键状态。Wayland 的鼠标事件不携带修饰键（layer-shell 一般不拿键盘焦点），
+/// 拿不到时保持默认值，相关功能走托盘菜单。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+}
+
 /// 归一化后的输入/窗口事件。
 #[derive(Debug, Clone, Copy)]
 pub enum Input {
-    /// 按键按下（X11 的 button：1 左键、4/5 滚轮）
-    ButtonPress { button: u8, root_x: i32, root_y: i32 },
-    ButtonRelease { button: u8, root_x: i32, root_y: i32 },
+    /// 按键按下（X11 的 button：1 左键、3 右键、4/5 滚轮）
+    ButtonPress {
+        button: u8,
+        modifiers: Modifiers,
+        root_x: i32,
+        root_y: i32,
+    },
+    ButtonRelease {
+        button: u8,
+    },
     /// 指针移动（拖动时用根坐标计算）
     Motion { root_x: i32, root_y: i32 },
     /// 整帧需要重绘（Expose、被外部改变尺寸等）

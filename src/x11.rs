@@ -3,7 +3,7 @@
 //! 适用于 X11 会话，以及其他合成器的 XWayland；niri 的 xwayland-satellite
 //! 不尊重 override-redirect 摆放，那种环境请使用 Wayland 后端。
 
-use crate::overlay::{Input, Overlay, OverlayResult};
+use crate::overlay::{Input, Modifiers, Overlay, OverlayResult};
 use std::os::fd::{AsRawFd, RawFd};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::shape::{self, ConnectionExt as _, SK, SO};
@@ -133,14 +133,13 @@ impl Overlay for X11Overlay {
             match self.conn.poll_for_event() {
                 Ok(Some(Event::ButtonPress(e))) => out.push(Input::ButtonPress {
                     button: e.detail,
+                    modifiers: modifiers_from(e.state),
                     root_x: e.root_x as i32,
                     root_y: e.root_y as i32,
                 }),
-                Ok(Some(Event::ButtonRelease(e))) => out.push(Input::ButtonRelease {
-                    button: e.detail,
-                    root_x: e.root_x as i32,
-                    root_y: e.root_y as i32,
-                }),
+                Ok(Some(Event::ButtonRelease(e))) => {
+                    out.push(Input::ButtonRelease { button: e.detail })
+                }
                 Ok(Some(Event::MotionNotify(e))) => out.push(Input::Motion {
                     root_x: e.root_x as i32,
                     root_y: e.root_y as i32,
@@ -261,6 +260,14 @@ impl Overlay for X11Overlay {
 
     fn screen_size(&self) -> (u32, u32) {
         (self.screen_w, self.screen_h)
+    }
+}
+
+/// 从按键状态掩码提取我们关心的修饰键。
+fn modifiers_from(state: KeyButMask) -> Modifiers {
+    Modifiers {
+        shift: state.contains(KeyButMask::SHIFT),
+        ctrl: state.contains(KeyButMask::CONTROL),
     }
 }
 

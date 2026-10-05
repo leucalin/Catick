@@ -9,6 +9,9 @@ use std::path::Path;
 /// 文字周围留白（像素），避免抗锯齿边缘被裁切。
 const PADDING: f64 = 6.0;
 
+/// 尺寸测量用的模板：所有计时模式都是等宽的 `HH:MM:SS`。
+pub const TEMPLATE: &str = "88:88:88";
+
 /// 渲染样式（由配置派生，编辑模式下会被就地调整后回写配置）。
 #[derive(Debug, Clone)]
 pub struct Style {
@@ -55,12 +58,13 @@ fn measure_inner(style: &Style, template: &str) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-/// 渲染一帧：整幅清为透明，文字在正中显示。
+/// 渲染一帧：整幅清为透明，文字在正中显示；`edit` 时叠加编辑模式指示底。
 pub fn render(
     style: &Style,
     text: &str,
     width: u32,
     height: u32,
+    edit: bool,
 ) -> Result<Frame, Box<dyn std::error::Error>> {
     let mut surface = ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
     let cr = Context::new(&surface)?;
@@ -69,6 +73,17 @@ pub fn render(
     cr.set_operator(Operator::Clear);
     cr.paint()?;
     cr.set_operator(Operator::Source);
+
+    if edit {
+        // 编辑模式：暗底 + 细边框，提示当前可拖动/滚轮调整
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+        cr.rectangle(1.0, 1.0, width as f64 - 2.0, height as f64 - 2.0);
+        cr.fill()?;
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.55);
+        cr.set_line_width(1.0);
+        cr.rectangle(1.5, 1.5, width as f64 - 3.0, height as f64 - 3.0);
+        cr.stroke()?;
+    }
 
     apply_font(&cr, style);
     let (r, g, b) = style.color;

@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 cairo-rs = { version = "0.22", default-features = false, features = ["png"] }
-x11rb = { version = "0.14.0", features = ["shape"] }
+x11rb = { version = "0.14.0", features = ["shape", "xtest"] }
 clap = { version = "4", features = ["derive"] }
 rustix = { version = "1", features = ["event", "mm", "pipe", "time"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
