@@ -14,6 +14,13 @@ use ksni::{Icon, ToolTip, Tray};
 use rustix::fd::OwnedFd;
 use std::sync::mpsc::{Receiver, Sender};
 
+/// StatusNotifierItem 的 `Id`。
+///
+/// 前缀是**零宽空格**：宿主（实测 DankMaterialShell）在图标位图异步加载期间会
+/// 回落到「Id 的首字母」作为占位符，于是每次换图标都会闪出一个 "C"。
+/// 首位放不可见字符后，占位符渲染为空白，Id 本身仍是有效标识。
+const TRAY_ID: &str = "\u{200B}catick";
+
 /// 托盘发回主循环的命令。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -103,7 +110,7 @@ fn item<F: Fn(&mut CatickTray) + Send + 'static>(label: &str, f: F) -> MenuItem<
 
 impl Tray for CatickTray {
     fn id(&self) -> String {
-        "catick".into()
+        TRAY_ID.into()
     }
 
     fn title(&self) -> String {
@@ -461,4 +468,18 @@ fn normalize_hex(color: &str) -> String {
         "#{}",
         color.trim().trim_start_matches('#').to_ascii_lowercase()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    /// Id 的首字符必须不可见：宿主在图标加载期间会把它当作占位符显示。
+    #[test]
+    fn tray_id_starts_with_invisible_char() {
+        let first = super::TRAY_ID.chars().next().expect("id 非空");
+        assert!(
+            !first.is_alphanumeric() && !first.is_whitespace(),
+            "首字符应是零宽字符，实际是 {first:?}"
+        );
+        assert!(super::TRAY_ID.ends_with("catick"));
+    }
 }

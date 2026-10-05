@@ -82,7 +82,12 @@ macro_rules! debug_log {
     };
 }
 
-/// 渲染托盘图标（22/44px）。进度环量化到 1/60 圈；图片图标按动画帧取帧。
+/// 渲染托盘图标（22/44px）。
+///
+/// 进度环是**静态**的：图标一旦注册就不再改变。宿主（如 quickshell）在每次收到
+/// NewIcon 时都会有一帧拿不到 pixmap，回落到字母占位符，表现为托盘闪一下——
+/// 所以这里不能按进度重绘，精确时间由 tooltip 和悬浮窗给出。
+/// 图片图标按动画帧取帧（GIF 会动，闪动是该模式的固有代价）。
 fn render_tray_icons(
     cfg: &Config,
     timer: &crate::timer::Timer,
@@ -101,11 +106,8 @@ fn render_tray_icons(
             true,
         );
     }
-    const STEPS: f64 = 60.0;
-    let quantized = (timer.progress(now) * STEPS).round() / STEPS;
-    let glyph = crate::render::TrayGlyph {
-        fraction: quantized,
-    };
+    let _ = (timer, now); // 图标与时间无关（见上方说明）
+    let glyph = crate::render::TrayGlyph { fraction: 1.0 };
     (
         crate::render::render_icon(glyph, 22, style.color).unwrap_or_default(),
         crate::render::render_icon(glyph, 44, style.color).unwrap_or_default(),
@@ -690,10 +692,8 @@ impl App {
                 now,
             );
         }
-        const STEPS: f64 = 60.0;
-        let quantized = (self.timer.progress(now) * STEPS).round() / STEPS;
         let key = format!(
-            "{quantized:.4}|{:.3},{:.3},{:.3}",
+            "{:.3},{:.3},{:.3}",
             self.style.color.0, self.style.color.1, self.style.color.2
         );
         if let Some((cached_key, small, big)) = &self.icon_cache

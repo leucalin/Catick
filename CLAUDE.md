@@ -77,7 +77,11 @@ rendered with cairo, controlled by mouse and a StatusNotifierItem tray.
   progress ring (a single arc — no track, no text) or a user image, and the
   menu groups appearance options (fonts from `fc-list`, colors, size, opacity,
   tray icon, language) under a Settings submenu. Pause/reset are emitted with
-  `enabled: false` in clock mode. **Callbacks may only send to the
+  `enabled: false` in clock mode. Two host-driven quirks are baked in:
+  `TRAY_ID` starts with a zero-width space (DankMaterialShell renders the Id's
+  first letter as a placeholder while an icon loads, which flashed a "C"), and
+  the ring is quantized to 1/60 of its cycle so the icon changes rarely
+  (every tick would swap the bitmap and briefly blank the item). **Callbacks may only send to the
   mpsc channel and poke the wake pipe** — never call `Handle::update` from a
   callback (deadlock); the main loop pushes state back via `update`.
 - `src/config.rs` — TOML at `$XDG_CONFIG_HOME/catick/config.toml`.
