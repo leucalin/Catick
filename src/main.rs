@@ -106,6 +106,22 @@ impl Cli {
     }
 }
 
+/// 单实例锁：避免两个悬浮计时器叠在一起；进程退出（fd 关闭）自动释放。
+fn acquire_single_instance() -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let path = dir.join("catick.lock");
+    let file = std::fs::File::create(&path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err("catick 已在运行（若确认没有，请删除 $XDG_RUNTIME_DIR/catick.lock）".into())
+        }
+        Err(std::fs::TryLockError::Error(err)) => Err(err.into()),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let first_run = Config::path().is_some_and(|p| !p.exists());
@@ -132,5 +148,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    app::App::new(cfg)?.run()
+    // 调试输出（--dump-*）不需要占用实例锁
+    let _lock = acquire_single_instance()?;
+
+    let result = app::App::new(cfg)?.run();
+    if let Err(err) = &result {
+        eprintln!("catick: 退出：{err}");
+    }
+    result
 }

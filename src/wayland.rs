@@ -172,12 +172,13 @@ impl WaylandOverlay {
             let fd = self.poll_fd();
             // SAFETY: fd 由 self 持有，在 wait_configured 期间保持有效
             let fd_ref = unsafe { rustix::fd::BorrowedFd::borrow_raw(fd) };
-            let mut fds = [rustix::event::PollFd::new(&fd_ref, rustix::event::PollFlags::IN)];
+            let mut fds = [rustix::event::PollFd::new(
+                &fd_ref,
+                rustix::event::PollFlags::IN,
+            )];
             let ts = rustix::time::Timespec::try_from(Duration::from_millis(200))?;
             let _ = rustix::event::poll(&mut fds, Some(&ts));
-            let readable = fds[0]
-                .revents()
-                .contains(rustix::event::PollFlags::IN);
+            let readable = fds[0].revents().contains(rustix::event::PollFlags::IN);
             let _ = self.drain_events(readable);
         }
         Ok(())
@@ -275,7 +276,11 @@ impl Overlay for WaylandOverlay {
             return Ok(());
         };
         if on {
-            let compositor = self.state.compositor.clone().ok_or("Wayland: 缺少 compositor")?;
+            let compositor = self
+                .state
+                .compositor
+                .clone()
+                .ok_or("Wayland: 缺少 compositor")?;
             let region = compositor.create_region(&self.queue.handle(), ());
             surface.set_input_region(Some(&region));
             region.destroy();
@@ -481,7 +486,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             } => {
                 state.pointer_pos = (surface_x, surface_y);
                 let (x, y) = root(state);
-                state.pending.push(Input::Motion { root_x: x, root_y: y });
+                state.pending.push(Input::Motion {
+                    root_x: x,
+                    root_y: y,
+                });
             }
             wl_pointer::Event::Button {
                 button,

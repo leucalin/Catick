@@ -140,7 +140,11 @@ impl Config {
                 // 保留用户原文件，避免之后的自动保存把内容覆盖掉
                 let backup = path.with_extension("toml.bak");
                 let _ = std::fs::rename(&path, &backup);
-                eprintln!("catick: {} 解析失败（{err}），已备份为 {}", path.display(), backup.display());
+                eprintln!(
+                    "catick: {} 解析失败（{err}），已备份为 {}",
+                    path.display(),
+                    backup.display()
+                );
                 Config::default()
             }
         }
@@ -227,12 +231,12 @@ pub fn parse_color(input: &str) -> Option<(f64, f64, f64)> {
     match s.len() {
         3 => {
             let v = u16::from_str_radix(s, 16).ok()?;
-            let (r, g, b) = (((v >> 8) & 0xf) as u8, ((v >> 4) & 0xf) as u8, (v & 0xf) as u8);
-            Some((
-                expand(r * 16 + r),
-                expand(g * 16 + g),
-                expand(b * 16 + b),
-            ))
+            let (r, g, b) = (
+                ((v >> 8) & 0xf) as u8,
+                ((v >> 4) & 0xf) as u8,
+                (v & 0xf) as u8,
+            );
+            Some((expand(r * 16 + r), expand(g * 16 + g), expand(b * 16 + b)))
         }
         6 => {
             let v = u32::from_str_radix(s, 16).ok()?;

@@ -89,8 +89,7 @@ impl Timer {
             clock_24h: cfg.clock_24h,
             work,
             short_break: parse_duration(&pomo.short_break).unwrap_or(Duration::from_secs(5 * 60)),
-            long_break: parse_duration(&pomo.long_break)
-                .unwrap_or(Duration::from_secs(15 * 60)),
+            long_break: parse_duration(&pomo.long_break).unwrap_or(Duration::from_secs(15 * 60)),
             cycles: pomo.cycles.max(1),
         };
         match cfg.mode {
@@ -261,7 +260,11 @@ impl Timer {
     pub fn display(&self, now: Duration) -> String {
         match self.mode {
             Mode::Clock => {
-                let fmt = if self.clock_24h { "%H:%M:%S" } else { "%I:%M:%S" };
+                let fmt = if self.clock_24h {
+                    "%H:%M:%S"
+                } else {
+                    "%I:%M:%S"
+                };
                 chrono::Local::now().format(fmt).to_string()
             }
             Mode::Stopwatch => format_hms(floor_secs(self.elapsed_at(now))),
@@ -321,7 +324,12 @@ impl Timer {
 }
 
 fn format_hms(total: u64) -> String {
-    format!("{:02}:{:02}:{:02}", total / 3600, (total / 60) % 60, total % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        (total / 60) % 60,
+        total % 60
+    )
 }
 
 fn ceil_secs(d: Duration) -> u64 {

@@ -101,10 +101,10 @@ impl App {
         let (phys_w, phys_h) = measure_phys(&style, scale);
         let (w, h) = logical_size(phys_w, phys_h, scale);
         let (screen_w, screen_h) = ov.screen_size();
-        let (x, y) = cfg
-            .position
-            .map(|p| (p.x, p.y))
-            .unwrap_or((((screen_w.saturating_sub(w)) / 2) as i32, (screen_h / 5) as i32));
+        let (x, y) = cfg.position.map(|p| (p.x, p.y)).unwrap_or((
+            ((screen_w.saturating_sub(w)) / 2) as i32,
+            (screen_h / 5) as i32,
+        ));
         ov.set_geometry(x, y, w, h)?;
         // 编辑模式必须可交互，进入编辑前先关掉穿透
         ov.set_passthrough(cfg.click_through && !edit_mode)?;
@@ -188,9 +188,9 @@ impl App {
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(err) => return Err(err.into()),
             }
-            let backend_readable = fds[0].revents().intersects(
-                PollFlags::IN | PollFlags::ERR | PollFlags::HUP,
-            );
+            let backend_readable = fds[0]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP);
 
             for ev in self.ov.drain_events(backend_readable) {
                 self.handle_input(ev, now)?;
@@ -262,7 +262,8 @@ impl App {
             Command::ToggleEditMode => self.toggle_edit_mode()?,
             Command::ToggleClickThrough => {
                 self.cfg.click_through = !self.cfg.click_through;
-                self.ov.set_passthrough(self.cfg.click_through && !self.edit_mode)?;
+                self.ov
+                    .set_passthrough(self.cfg.click_through && !self.edit_mode)?;
                 persist = true;
             }
             Command::ToggleClockFormat => {
@@ -362,9 +363,8 @@ impl App {
                 if let Some(drag) = &self.drag {
                     let dx = root_x - drag.press_root.0;
                     let dy = root_y - drag.press_root.1;
-                    let moved = drag.moved
-                        || dx.abs() > DRAG_THRESHOLD
-                        || dy.abs() > DRAG_THRESHOLD;
+                    let moved =
+                        drag.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD;
                     let (nx, ny) = (drag.win_pos.0 + dx, drag.win_pos.1 + dy);
                     let (_, _, w, h) = self.ov.geometry();
                     self.ov.set_geometry(nx, ny, w, h)?;
@@ -442,7 +442,8 @@ impl App {
     /// 右键：进入 / 退出编辑模式；退出时落盘。
     fn toggle_edit_mode(&mut self) -> Result<(), Box<dyn Error>> {
         self.edit_mode = !self.edit_mode;
-        self.ov.set_passthrough(self.cfg.click_through && !self.edit_mode)?;
+        self.ov
+            .set_passthrough(self.cfg.click_through && !self.edit_mode)?;
         if !self.edit_mode {
             self.persist();
         }

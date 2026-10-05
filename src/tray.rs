@@ -115,7 +115,11 @@ impl Tray for CatickTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let pause_label = if self.state.running { "暂停" } else { "继续" };
+        let pause_label = if self.state.running {
+            "暂停"
+        } else {
+            "继续"
+        };
         let mode_index = match self.state.mode {
             Mode::Clock => 0,
             Mode::Countdown => 1,
@@ -139,26 +143,28 @@ impl Tray for CatickTray {
             MenuItem::Separator,
             SubMenu {
                 label: "模式".into(),
-                submenu: vec![RadioGroup {
-                    selected: mode_index,
-                    select: Box::new(|t: &mut Self, index: usize| {
-                        let mode = match index {
-                            0 => Mode::Clock,
-                            1 => Mode::Countdown,
-                            2 => Mode::Stopwatch,
-                            _ => Mode::Pomodoro,
-                        };
-                        t.send(Command::SetMode(mode));
-                    }),
-                    options: ["时钟", "倒计时", "秒表", "番茄钟"]
-                        .iter()
-                        .map(|label| RadioItem {
-                            label: (*label).into(),
-                            ..Default::default()
-                        })
-                        .collect(),
-                }
-                .into()],
+                submenu: vec![
+                    RadioGroup {
+                        selected: mode_index,
+                        select: Box::new(|t: &mut Self, index: usize| {
+                            let mode = match index {
+                                0 => Mode::Clock,
+                                1 => Mode::Countdown,
+                                2 => Mode::Stopwatch,
+                                _ => Mode::Pomodoro,
+                            };
+                            t.send(Command::SetMode(mode));
+                        }),
+                        options: ["时钟", "倒计时", "秒表", "番茄钟"]
+                            .iter()
+                            .map(|label| RadioItem {
+                                label: (*label).into(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
                 ..Default::default()
             }
             .into(),

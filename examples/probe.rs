@@ -23,7 +23,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let img = conn
-        .get_image(ImageFormat::Z_PIXMAP, win, 0, 0, w as u16, h as u16, u32::MAX)?
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            win,
+            0,
+            0,
+            w as u16,
+            h as u16,
+            u32::MAX,
+        )?
         .reply()?;
     if !hash_only {
         println!("图像 depth={} 数据长度={}", img.depth, img.data.len());
@@ -31,7 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sample = |x: u32, y: u32| -> (u8, u8, u8, u8) {
         let i = ((y * w + x) * 4) as usize; // depth-32 ZPixmap：BGRX（小端）
-        (img.data[i + 3], img.data[i + 2], img.data[i + 1], img.data[i])
+        (
+            img.data[i + 3],
+            img.data[i + 2],
+            img.data[i + 1],
+            img.data[i],
+        )
     };
     if !hash_only {
         for (label, x, y) in [

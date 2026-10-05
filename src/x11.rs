@@ -6,9 +6,9 @@
 use crate::overlay::{Input, Modifiers, Overlay, OverlayResult};
 use std::os::fd::{AsRawFd, RawFd};
 use x11rb::connection::{Connection, RequestConnection};
+use x11rb::protocol::Event;
 use x11rb::protocol::shape::{self, ConnectionExt as _, SK, SO};
 use x11rb::protocol::xproto::{ClipOrdering, ConnectionExt as _, *};
-use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 /// 单次 put_image 请求的最大字节数（保守值，避免触发 BigRequests）。
@@ -185,13 +185,7 @@ impl Overlay for X11Overlay {
     fn present(&mut self, buf: &[u8], w: u32, h: u32) -> OverlayResult<()> {
         let stride = w as usize * 4;
         if buf.len() < stride * h as usize {
-            return Err(format!(
-                "帧缓冲尺寸不足: {} < {}x{}x4",
-                buf.len(),
-                w,
-                h
-            )
-            .into());
+            return Err(format!("帧缓冲尺寸不足: {} < {}x{}x4", buf.len(), w, h).into());
         }
         // 分带发送，单请求不超过 MAX_REQUEST_BYTES
         let band_rows = (MAX_REQUEST_BYTES / stride.max(1)).max(1) as u32;

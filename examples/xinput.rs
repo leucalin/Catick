@@ -83,7 +83,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn motion(conn: &RustConnection, root: u32, x: i16, y: i16) -> Result<(), Box<dyn std::error::Error>> {
+fn motion(
+    conn: &RustConnection,
+    root: u32,
+    x: i16,
+    y: i16,
+) -> Result<(), Box<dyn std::error::Error>> {
     conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x, y, 0)?;
     conn.flush()?;
     Ok(())

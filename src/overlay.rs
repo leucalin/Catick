@@ -32,7 +32,10 @@ pub enum Input {
         button: u8,
     },
     /// 指针移动（拖动时用根坐标计算；Wayland 下为「局部坐标 + 窗口位置」）
-    Motion { root_x: i32, root_y: i32 },
+    Motion {
+        root_x: i32,
+        root_y: i32,
+    },
     /// 整帧需要重绘（Expose、被外部改变尺寸/缩放等）
     Redraw,
     /// 窗口已被显示服务器关闭，应退出
