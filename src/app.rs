@@ -84,10 +84,9 @@ macro_rules! debug_log {
 
 /// 渲染托盘图标（22/44px）。
 ///
-/// 进度环是**静态**的：图标一旦注册就不再改变。宿主（如 quickshell）在每次收到
-/// NewIcon 时都会有一帧拿不到 pixmap，回落到字母占位符，表现为托盘闪一下——
-/// 所以这里不能按进度重绘，精确时间由 tooltip 和悬浮窗给出。
-/// 图片图标按动画帧取帧（GIF 会动，闪动是该模式的固有代价）。
+/// 进度环按 1/60 圈**量化**：只在跨过台阶时更换图标，避免每秒都换图
+/// （宿主换图那一帧会闪出占位符）；占位符本身已由 Id 的零宽前缀变成不可见。
+/// 图片图标按动画帧取帧。
 fn render_tray_icons(
     cfg: &Config,
     timer: &crate::timer::Timer,
@@ -106,8 +105,11 @@ fn render_tray_icons(
             true,
         );
     }
-    let _ = (timer, now); // 图标与时间无关（见上方说明）
-    let glyph = crate::render::TrayGlyph { fraction: 1.0 };
+    const STEPS: f64 = 60.0;
+    let quantized = (timer.progress(now) * STEPS).round() / STEPS;
+    let glyph = crate::render::TrayGlyph {
+        fraction: quantized,
+    };
     (
         crate::render::render_icon(glyph, 22, style.color).unwrap_or_default(),
         crate::render::render_icon(glyph, 44, style.color).unwrap_or_default(),
@@ -692,8 +694,10 @@ impl App {
                 now,
             );
         }
+        const STEPS: f64 = 60.0;
+        let quantized = (self.timer.progress(now) * STEPS).round() / STEPS;
         let key = format!(
-            "{:.3},{:.3},{:.3}",
+            "{quantized:.4}|{:.3},{:.3},{:.3}",
             self.style.color.0, self.style.color.1, self.style.color.2
         );
         if let Some((cached_key, small, big)) = &self.icon_cache
@@ -816,5 +820,39 @@ impl App {
         self.frame_blink_on = blink_on;
         self.dirty = false;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 进度环必须随时间推进（曾把图标改成静态的，表现为"环不刷新"），
+    /// 同时同一量化台阶内字节要保持一致，避免宿主频繁换图闪烁。
+    #[test]
+    fn tray_ring_follows_progress_in_quantized_steps() {
+        let cfg = Config {
+            mode: Mode::Countdown,
+            duration: "10m".into(),
+            ..Config::default()
+        };
+        let style = Style::from_config(&cfg);
+        let t0 = Duration::from_secs(1_000);
+        let timer = Timer::new(&cfg, t0);
+        let icon = |offset: u64| {
+            render_tray_icons(
+                &cfg,
+                &timer,
+                &style,
+                None,
+                t0,
+                t0 + Duration::from_secs(offset),
+            )
+            .0
+        };
+        // 10 分钟 / 60 阶 = 每 10 秒跨一阶
+        assert_eq!(icon(1), icon(2), "同一台阶内不应重绘");
+        assert_ne!(icon(0), icon(11), "跨台阶后图标必须更新");
+        assert_ne!(icon(11), icon(21), "之后每个台阶都要继续更新");
     }
 }
